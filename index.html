@@ -2,18 +2,47 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="LiveCall Web" />
+    <meta name="theme-color" content="#0f172a" />
     <title>LiveCall Web - Video & Audio Chat (iPad & iOS 9.3.5 Compatible)</title>
     <meta name="description" content="Real-time WebRTC and legacy fallback audio/video calling and chatting application for iPad mini 2 and modern web browsers." />
     <meta property="og:title" content="My Google AI Studio App" />
     <meta property="og:description" content="An application built with Google AI Studio." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <style>
+      html, body, #root {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background-color: #0f172a;
+        color: #e2e8f0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      }
+      body {
+        min-height: 100vh;
+        min-height: 100dvh;
+      }
+      #root {
+        display: flex;
+        flex-direction: column;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <noscript>
+      <div style="display: flex; align-items: center; justify-content: center; height: 100vh; background: #0f172a; color: #e2e8f0; font-family: system-ui, sans-serif; padding: 20px; text-align: center;">
+        <div style="max-width: 500px;">
+          <h1>JavaScript Required</h1>
+          <p>This application requires JavaScript to be enabled. Please enable JavaScript in your browser settings.</p>
+        </div>
+      </div>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
