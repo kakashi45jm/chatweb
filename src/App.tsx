@@ -1,0 +1,551 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { UserProfile, ChatMessage, RoomInfo, StreamMode, WSMessage } from './types';
+import { useWebRTC } from './hooks/useWebRTC';
+import { runDeviceDiagnostics, unlockAudio, getSafeAudioContext, autoEnableOlderSafariCompatibility } from './utils/legacyCompatibility';
+import { soundEffects } from './utils/audioHelper';
+import { Sidebar } from './components/Sidebar';
+import { ChatArea } from './components/ChatArea';
+import { CallModal } from './components/CallModal';
+import { IncomingCallBanner } from './components/IncomingCallBanner';
+import { CompatibilityDiagnostics } from './components/CompatibilityDiagnostics';
+import { InviteModal } from './components/InviteModal';
+import { LoginForm } from './components/LoginForm';
+import { Menu, X, Radio, Tablet, Sparkles, CheckCircle, Volume2, Cpu, LogOut } from 'lucide-react';
+
+const INITIAL_COLORS = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4'];
+
+export default function App() {
+  // Initial device diagnostics & auto-enable routine
+  const autoInit = autoEnableOlderSafariCompatibility();
+  const diagnostics = autoInit.diag;
+
+  // Authentication State
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(() => {
+    if (typeof localStorage !== 'undefined') {
+      const remember = localStorage.getItem('livecall_remember_me');
+      const savedUser = localStorage.getItem('livecall_auth_user');
+      return remember === 'true' && !!savedUser;
+    }
+    return false;
+  });
+
+  // User Profile
+  const [currentUser, setCurrentUser] = useState<UserProfile>(() => {
+    let savedUserObj: UserProfile | null = null;
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem('livecall_auth_user');
+      if (raw) {
+        try {
+          savedUserObj = JSON.parse(raw);
+        } catch {}
+      }
+    }
+
+    const savedName = savedUserObj?.name || (typeof localStorage !== 'undefined' ? localStorage.getItem('livecall_username') : null);
+    const savedColor = savedUserObj?.avatarColor || (typeof localStorage !== 'undefined' ? localStorage.getItem('livecall_avatar_color') : null);
+    const deviceName = diagnostics.isiPadMini2Suspected
+      ? 'iPad mini 2'
+      : diagnostics.isiPad
+      ? 'iPad'
+      : diagnostics.isiOS
+      ? `iOS ${diagnostics.iosVersion || 'Device'}`
+      : diagnostics.isOlderSafari
+      ? 'Older Safari'
+      : 'Web Client';
+
+    return {
+      id: savedUserObj?.id || `usr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+      name: savedName || `Guest ${Math.floor(1000 + Math.random() * 9000)}`,
+      email: savedUserObj?.email,
+      avatarColor: savedColor || INITIAL_COLORS[Math.floor(Math.random() * INITIAL_COLORS.length)],
+      deviceType: deviceName,
+      isIosLegacy: diagnostics.isiOS && (diagnostics.iosVersion ? parseFloat(diagnostics.iosVersion) < 13 : true),
+      joinedAt: Date.now(),
+    };
+  });
+
+  // Room State
+  const [currentRoomId, setCurrentRoomId] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const r = params.get('room');
+      if (r) return r.toLowerCase().replace(/[^a-z0-9-_]/g, '-');
+    }
+    return 'general';
+  });
+
+  const [currentRoomName, setCurrentRoomName] = useState<string>('General Lobby');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [participants, setParticipants] = useState<UserProfile[]>([currentUser]);
+  const [typingUsers, setTypingUsers] = useState<string[]>([]);
+  const [isConnected, setIsConnected] = useState<boolean>(false);
+
+  // Settings & Modes (Auto-configured for older Safari / iPad mini 2)
+  const [streamModePreference, setStreamModePreference] = useState<StreamMode>(
+    autoInit.isAutoEnabled ? 'legacy_relay' : diagnostics.recommendedMode
+  );
+  const [isLowMemoryMode, setIsLowMemoryMode] = useState<boolean>(
+    autoInit.isAutoEnabled || diagnostics.isiPadMini2Suspected || diagnostics.isiOS
+  );
+  const [showAutoSafariBanner, setShowAutoSafariBanner] = useState<boolean>(autoInit.isAutoEnabled);
+  const [isAudioUnlocked, setIsAudioUnlocked] = useState<boolean>(false);
+  const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState<boolean>(false);
+  const [isInviteOpen, setIsInviteOpen] = useState<boolean>(false);
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
+
+  // WebSocket Ref
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<any>(null);
+  const pingIntervalRef = useRef<any>(null);
+
+  // Helper to send messages over WebSocket
+  const sendWS = useCallback((msg: any) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(msg));
+    }
+  }, []);
+
+  // WebRTC Hook
+  const {
+    localStream,
+    remoteStream,
+    localVideoRef,
+    remoteVideoRef,
+    isMuted,
+    isVideoOff,
+    cameraFacing,
+    activeCall,
+    callDuration,
+    effectiveStreamMode,
+    remoteFrameData,
+    localAudioLevel,
+    remoteAudioLevel,
+    connectionQuality,
+    mediaError,
+    startCall,
+    acceptCall,
+    rejectCall,
+    endCall,
+    toggleMute,
+    toggleVideo,
+    switchCamera,
+    handleWSMessage,
+  } = useWebRTC({
+    userId: currentUser.id,
+    roomId: currentRoomId,
+    sendWS,
+    streamModePreference,
+    isLowMemoryMode,
+  });
+
+  // Connect WebSocket
+  const connectWebSocket = useCallback(() => {
+    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+    try {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setIsConnected(true);
+        // Join room immediately
+        ws.send(JSON.stringify({
+          type: 'join_room',
+          roomId: currentRoomId,
+          user: currentUser,
+        }));
+
+        // Setup ping/pong keepalive
+        if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 20000);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg: WSMessage = JSON.parse(event.data);
+
+          switch (msg.type) {
+            case 'room_state': {
+              setCurrentRoomName(msg.room.name);
+              setParticipants(msg.room.participants);
+              setMessages(msg.messages);
+              if (msg.activeCall) {
+                handleWSMessage({ type: 'call_initiate', call: msg.activeCall });
+              }
+              break;
+            }
+
+            case 'user_joined': {
+              setParticipants((prev) => {
+                if (prev.some((p) => p.id === msg.user.id)) return prev;
+                return [...prev, msg.user];
+              });
+              break;
+            }
+
+            case 'user_left': {
+              setParticipants((prev) => prev.filter((p) => p.id !== msg.userId));
+              setTypingUsers((prev) => prev.filter((u) => u !== msg.userId));
+              break;
+            }
+
+            case 'chat_message': {
+              setMessages((prev) => [...prev, msg.message]);
+              if (msg.message.senderId !== currentUser.id && !msg.message.isSystem) {
+                soundEffects.playMessageSound(false);
+              }
+              break;
+            }
+
+            case 'typing': {
+              if (msg.isTyping) {
+                setTypingUsers((prev) => (prev.includes(msg.userName) ? prev : [...prev, msg.userName]));
+              } else {
+                setTypingUsers((prev) => prev.filter((u) => u !== msg.userName));
+              }
+              break;
+            }
+
+            default:
+              // Pass WebRTC & Call signaling to useWebRTC hook
+              handleWSMessage(msg);
+              break;
+          }
+        } catch (err) {
+          console.warn('WS parse error:', err);
+        }
+      };
+
+      ws.onclose = () => {
+        setIsConnected(false);
+        if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+        // Attempt reconnect after 2.5s
+        reconnectTimerRef.current = setTimeout(connectWebSocket, 2500);
+      };
+
+      ws.onerror = () => {
+        setIsConnected(false);
+      };
+    } catch (e) {
+      console.warn('WebSocket connection init failed:', e);
+      reconnectTimerRef.current = setTimeout(connectWebSocket, 3000);
+    }
+  }, [currentRoomId, currentUser, handleWSMessage]);
+
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    connectWebSocket();
+    return () => {
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, [connectWebSocket, isLoggedIn]);
+
+  // Handle Login / Join from LoginForm
+  const handleLogin = (user: UserProfile, targetRoomId: string) => {
+    setCurrentUser(user);
+    setCurrentRoomId(targetRoomId);
+    setCurrentRoomName(targetRoomId.charAt(0).toUpperCase() + targetRoomId.slice(1).replace(/-/g, ' '));
+    setIsLoggedIn(true);
+
+    if (typeof window !== 'undefined' && window.history) {
+      window.history.pushState({}, '', `?room=${targetRoomId}`);
+    }
+  };
+
+  // Handle Logout / Switch User
+  const handleLogout = () => {
+    if (activeCall) {
+      endCall();
+    }
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem('livecall_auth_user');
+      localStorage.removeItem('livecall_remember_me');
+    }
+    if (wsRef.current) {
+      sendWS({ type: 'leave_room', roomId: currentRoomId });
+      wsRef.current.close();
+    }
+    setIsLoggedIn(false);
+  };
+
+  // Global touch unlock listener for iPad / iOS Safari Audio
+  useEffect(() => {
+    const handleFirstGesture = () => {
+      const ctx = getSafeAudioContext();
+      unlockAudio(ctx);
+    };
+    window.addEventListener('touchstart', handleFirstGesture, { passive: true });
+    window.addEventListener('click', handleFirstGesture, { passive: true });
+    return () => {
+      window.removeEventListener('touchstart', handleFirstGesture);
+      window.removeEventListener('click', handleFirstGesture);
+    };
+  }, []);
+
+  // Update Username
+  const handleUpdateUserName = (newName: string) => {
+    const updated = { ...currentUser, name: newName };
+    setCurrentUser(updated);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('livecall_username', newName);
+    }
+    sendWS({
+      type: 'join_room',
+      roomId: currentRoomId,
+      user: updated,
+    });
+  };
+
+  // Update Avatar Color
+  const handleUpdateAvatarColor = (color: string) => {
+    const updated = { ...currentUser, avatarColor: color };
+    setCurrentUser(updated);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('livecall_avatar_color', color);
+    }
+    sendWS({
+      type: 'join_room',
+      roomId: currentRoomId,
+      user: updated,
+    });
+  };
+
+  // Switch Room
+  const handleSwitchRoom = (newRoomId: string) => {
+    if (newRoomId === currentRoomId) return;
+    sendWS({ type: 'leave_room', roomId: currentRoomId });
+    setCurrentRoomId(newRoomId);
+    setCurrentRoomName(newRoomId.charAt(0).toUpperCase() + newRoomId.slice(1).replace(/-/g, ' '));
+    setMessages([]);
+    setParticipants([currentUser]);
+    setIsMobileSidebarOpen(false);
+
+    // Update URL without full reload
+    if (typeof window !== 'undefined' && window.history) {
+      window.history.pushState({}, '', `?room=${newRoomId}`);
+    }
+
+    sendWS({
+      type: 'join_room',
+      roomId: newRoomId,
+      user: currentUser,
+    });
+  };
+
+  // Send Chat Message
+  const handleSendMessage = (text: string, attachment?: any) => {
+    const chatMsg: ChatMessage = {
+      id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+      roomId: currentRoomId,
+      senderId: currentUser.id,
+      senderName: currentUser.name,
+      senderAvatarColor: currentUser.avatarColor,
+      text,
+      attachment,
+      timestamp: Date.now(),
+    };
+
+    sendWS({
+      type: 'chat_message',
+      message: chatMsg,
+    });
+  };
+
+  // Broadcast Typing
+  const handleTyping = (isTyping: boolean) => {
+    sendWS({
+      type: 'typing',
+      isTyping,
+    });
+  };
+
+  if (!isLoggedIn) {
+    return (
+      <LoginForm
+        initialRoomId={currentRoomId}
+        diagnostics={diagnostics}
+        onLogin={handleLogin}
+      />
+    );
+  }
+
+  return (
+    <div id="livecall-app-root" className="flex h-screen w-screen overflow-hidden bg-slate-900 font-sans select-none antialiased">
+      
+      {/* Mobile Top Bar for toggling sidebar on smaller screens */}
+      <div className="sm:hidden fixed top-0 inset-x-0 z-30 flex items-center justify-between px-4 py-2.5 bg-slate-900 border-b border-slate-800 text-white">
+        <button
+          id="mobile-sidebar-toggle-btn"
+          onClick={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
+          className="p-1.5 rounded-lg bg-slate-800 text-slate-200"
+        >
+          {isMobileSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+        </button>
+        
+        <div className="font-bold text-sm flex items-center gap-1.5">
+          <Radio className="w-4 h-4 text-blue-400" />
+          <span>LiveCall Web</span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            id="mobile-logout-btn"
+            onClick={handleLogout}
+            className="p-1 text-slate-400 hover:text-red-400"
+            title="Sign Out"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
+          <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+        </div>
+      </div>
+
+      {/* Sidebar (Desktop persistent, Mobile drawer) */}
+      <div
+        className={`fixed inset-y-0 left-0 z-40 sm:static sm:z-auto transition-transform duration-300 ease-in-out ${
+          isMobileSidebarOpen ? 'translate-x-0' : '-translate-x-full sm:translate-x-0'
+        }`}
+      >
+        <Sidebar
+          currentUser={currentUser}
+          participants={participants}
+          currentRoomId={currentRoomId}
+          currentRoomName={currentRoomName}
+          onUpdateUserName={handleUpdateUserName}
+          onUpdateAvatarColor={handleUpdateAvatarColor}
+          onSwitchRoom={handleSwitchRoom}
+          onOpenDiagnostics={() => setIsDiagnosticsOpen(true)}
+          isLowMemoryMode={isLowMemoryMode}
+          onToggleLowMemory={() => setIsLowMemoryMode(!isLowMemoryMode)}
+          streamModePreference={streamModePreference}
+          isConnected={isConnected}
+          onLogout={handleLogout}
+        />
+      </div>
+
+      {/* Backdrop for mobile drawer */}
+      {isMobileSidebarOpen && (
+        <div
+          onClick={() => setIsMobileSidebarOpen(false)}
+          className="sm:hidden fixed inset-0 z-30 bg-black/60 backdrop-blur-xs"
+        />
+      )}
+
+      {/* Main Chat & Interactive Canvas Area */}
+      <main className="flex-1 flex flex-col h-full pt-12 sm:pt-0 overflow-hidden bg-slate-50">
+        {/* Older Safari Auto-Enable Compatibility Bar */}
+        {showAutoSafariBanner && (
+          <div id="safari-compat-banner" className="bg-emerald-900/90 text-emerald-100 px-4 py-2 text-xs flex flex-wrap items-center justify-between gap-2 border-b border-emerald-700/50">
+            <div className="flex items-center gap-2">
+              <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>
+                <strong className="text-white">Older Safari / iPad mini 2 Auto-Enabled:</strong> Low-latency Relay mode and audio engine are primed for instant video & audio calling.
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                id="btn-test-safari-audio"
+                onClick={() => {
+                  unlockAudio(getSafeAudioContext());
+                  soundEffects.playCallConnect();
+                  setIsAudioUnlocked(true);
+                }}
+                className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 active:bg-emerald-800 text-white rounded text-[11px] font-medium flex items-center gap-1 transition-colors"
+              >
+                <Volume2 className="w-3 h-3" />
+                <span>Test Audio</span>
+              </button>
+              <button
+                id="btn-dismiss-safari-banner"
+                onClick={() => setShowAutoSafariBanner(false)}
+                className="p-1 hover:bg-emerald-800 rounded text-emerald-300 hover:text-white"
+                title="Dismiss"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        <ChatArea
+          messages={messages}
+          currentUserId={currentUser.id}
+          currentUserName={currentUser.name}
+          roomName={currentRoomName}
+          roomId={currentRoomId}
+          participants={participants}
+          typingUsers={typingUsers}
+          streamModePreference={streamModePreference}
+          onSendMessage={handleSendMessage}
+          onStartCall={startCall}
+          onOpenInvite={() => setIsInviteOpen(true)}
+          onOpenDiagnostics={() => setIsDiagnosticsOpen(true)}
+          onTyping={handleTyping}
+          isLowMemoryMode={isLowMemoryMode}
+        />
+      </main>
+
+      {/* Incoming Call Ringing Notification Banner */}
+      <IncomingCallBanner
+        activeCall={activeCall}
+        currentUserId={currentUser.id}
+        onAccept={acceptCall}
+        onReject={rejectCall}
+      />
+
+      {/* Fullscreen / Floating Video & Audio Call Modal */}
+      <CallModal
+        activeCall={activeCall}
+        localVideoRef={localVideoRef}
+        remoteVideoRef={remoteVideoRef}
+        localStream={localStream}
+        remoteStream={remoteStream}
+        remoteFrameData={remoteFrameData}
+        effectiveStreamMode={effectiveStreamMode}
+        isMuted={isMuted}
+        isVideoOff={isVideoOff}
+        cameraFacing={cameraFacing}
+        callDuration={callDuration}
+        localAudioLevel={localAudioLevel}
+        remoteAudioLevel={remoteAudioLevel}
+        connectionQuality={connectionQuality}
+        mediaError={mediaError}
+        onToggleMute={toggleMute}
+        onToggleVideo={toggleVideo}
+        onSwitchCamera={switchCamera}
+        onEndCall={endCall}
+        isLowMemoryMode={isLowMemoryMode}
+      />
+
+      {/* iPad mini 2 & iOS 9.3.5 Hardware Diagnostics Modal */}
+      <CompatibilityDiagnostics
+        isOpen={isDiagnosticsOpen}
+        onClose={() => setIsDiagnosticsOpen(false)}
+        streamModePreference={streamModePreference}
+        onStreamModeChange={setStreamModePreference}
+        isLowMemoryMode={isLowMemoryMode}
+        onToggleLowMemory={() => setIsLowMemoryMode(!isLowMemoryMode)}
+      />
+
+      {/* Invite & QR Modal */}
+      <InviteModal
+        isOpen={isInviteOpen}
+        onClose={() => setIsInviteOpen(false)}
+        roomId={currentRoomId}
+        roomName={currentRoomName}
+      />
+
+    </div>
+  );
+}
