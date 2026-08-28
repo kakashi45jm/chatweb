@@ -9,6 +9,8 @@ import { GoogleGenAI } from '@google/genai';
 // Database directory & persistent users store
 const DATA_DIR = path.join(process.cwd(), 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const MESSAGES_FILE = path.join(DATA_DIR, 'room_messages.json');
+const DMS_FILE = path.join(DATA_DIR, 'dm_messages.json');
 
 interface StoredUser {
   id: string;
@@ -28,13 +30,17 @@ interface StoredUser {
   statusMessage?: string;
   customStatusEmoji?: string;
   bio?: string;
+  preferredLanguage?: string;
+  autoTranslate?: boolean;
   createdAt: number;
 }
 
 // Ensure data folder and load users
 let userDb = new Map<string, StoredUser>();
+let roomMessagesDb = new Map<string, any[]>();
+let dmStore = new Map<string, any[]>();
 
-function initUserDatabase() {
+function initDatabases() {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -48,6 +54,30 @@ function initUserDatabase() {
     }
   } catch (err) {
     console.error('Failed to load user database:', err);
+  }
+
+  try {
+    if (fs.existsSync(MESSAGES_FILE)) {
+      const raw = fs.readFileSync(MESSAGES_FILE, 'utf-8');
+      const obj = JSON.parse(raw);
+      for (const [rId, msgs] of Object.entries(obj)) {
+        roomMessagesDb.set(rId, Array.isArray(msgs) ? msgs : []);
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load room messages database:', err);
+  }
+
+  try {
+    if (fs.existsSync(DMS_FILE)) {
+      const raw = fs.readFileSync(DMS_FILE, 'utf-8');
+      const obj = JSON.parse(raw);
+      for (const [dmKey, msgs] of Object.entries(obj)) {
+        dmStore.set(dmKey, Array.isArray(msgs) ? msgs : []);
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load DM messages database:', err);
   }
 
   // Ensure Admin account exists in database
@@ -85,7 +115,41 @@ function saveUserDatabase() {
   }
 }
 
-initUserDatabase();
+let saveMsgTimeout: any = null;
+function saveRoomMessagesDebounced() {
+  if (saveMsgTimeout) clearTimeout(saveMsgTimeout);
+  saveMsgTimeout = setTimeout(() => {
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      const obj: Record<string, any[]> = {};
+      for (const [k, v] of roomMessagesDb.entries()) {
+        obj[k] = v.slice(-300);
+      }
+      fs.writeFileSync(MESSAGES_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+    } catch (e) {
+      console.error('Failed to save room messages:', e);
+    }
+  }, 150);
+}
+
+let saveDmTimeout: any = null;
+function saveDmMessagesDebounced() {
+  if (saveDmTimeout) clearTimeout(saveDmTimeout);
+  saveDmTimeout = setTimeout(() => {
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      const obj: Record<string, any[]> = {};
+      for (const [k, v] of dmStore.entries()) {
+        obj[k] = v.slice(-300);
+      }
+      fs.writeFileSync(DMS_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+    } catch (e) {
+      console.error('Failed to save DM messages:', e);
+    }
+  }, 150);
+}
+
+initDatabases();
 
 interface ClientConnection {
   ws: WebSocket;
@@ -107,7 +171,6 @@ interface RoomState {
 const rooms = new Map<string, RoomState>();
 const clients = new Map<WebSocket, ClientConnection>();
 const globalUsers = new Map<string, any>();
-const dmStore = new Map<string, any[]>();
 
 function getDmKey(userA: string, userB: string): string {
   return [userA, userB].sort().join(':::');
@@ -117,12 +180,13 @@ let currentAnnouncement: string = 'Welcome to LiveCall Web - Ultra-fast Voice, V
 
 function getOrCreateRoom(roomId: string, roomName?: string): RoomState {
   if (!rooms.has(roomId)) {
+    const persistedMessages = roomMessagesDb.get(roomId) || [];
     rooms.set(roomId, {
       id: roomId,
       name: roomName || `Room #${roomId.substring(0, 6)}`,
       createdAt: Date.now(),
       participants: new Map(),
-      messages: [],
+      messages: [...persistedMessages],
       activeCall: null,
     });
   }
@@ -283,16 +347,68 @@ async function startServer() {
     }
   });
 
-  // User Profile Update Sync Endpoint
+  // Get Authenticated User Profile Endpoint
+  app.get('/api/auth/me', (req, res) => {
+    try {
+      const { id, username, handle } = req.query;
+      let user: StoredUser | undefined;
+      if (username) {
+        user = userDb.get(String(username).toLowerCase().replace(/^@/, ''));
+      }
+      if (!user && handle) {
+        user = userDb.get(String(handle).toLowerCase().replace(/^@/, ''));
+      }
+      if (!user && id) {
+        for (const u of userDb.values()) {
+          if (u.id === id) {
+            user = u;
+            break;
+          }
+        }
+      }
+      if (user) {
+        const { password: _, ...safeProfile } = user;
+        return res.json({ success: true, user: safeProfile });
+      }
+      res.status(404).json({ error: 'User not found in database.' });
+    } catch (err: any) {
+      res.status(500).json({ error: 'Failed to fetch user profile.' });
+    }
+  });
+
+  // User Profile Update Sync Endpoint (Permanent Storage)
   app.post('/api/auth/update-profile', (req, res) => {
     try {
-      const { username, updates } = req.body;
-      if (!username || !updates) {
-        return res.status(400).json({ error: 'Username and updates are required.' });
+      const { username, userId, updates } = req.body;
+      if (!updates) {
+        return res.status(400).json({ error: 'Updates are required.' });
       }
 
-      const cleanUsername = username.trim().toLowerCase().replace(/^@/, '');
-      const existingUser = userDb.get(cleanUsername);
+      const cleanUsername = (username || updates.username || updates.handle || updates.name || '')
+        .toString()
+        .trim()
+        .toLowerCase()
+        .replace(/^@/, '');
+
+      const targetId = userId || updates.id;
+
+      // Find existing user by username, handle, or user ID
+      let existingUser: StoredUser | undefined;
+      if (cleanUsername && userDb.has(cleanUsername)) {
+        existingUser = userDb.get(cleanUsername);
+      }
+      if (!existingUser && targetId) {
+        for (const u of userDb.values()) {
+          if (u.id === targetId) {
+            existingUser = u;
+            break;
+          }
+        }
+      }
+      if (!existingUser && updates.handle) {
+        const cleanHandle = updates.handle.trim().toLowerCase().replace(/^@/, '');
+        existingUser = userDb.get(cleanHandle);
+      }
 
       if (existingUser) {
         const updated: StoredUser = {
@@ -308,19 +424,67 @@ async function startServer() {
           statusMessage: updates.statusMessage !== undefined ? updates.statusMessage : existingUser.statusMessage,
           customStatusEmoji: updates.customStatusEmoji !== undefined ? updates.customStatusEmoji : existingUser.customStatusEmoji,
           bio: updates.bio !== undefined ? updates.bio : existingUser.bio,
+          preferredLanguage: updates.preferredLanguage || existingUser.preferredLanguage,
+          autoTranslate: updates.autoTranslate !== undefined ? updates.autoTranslate : existingUser.autoTranslate,
         };
 
-        userDb.set(cleanUsername, updated);
+        userDb.set(existingUser.username.toLowerCase(), updated);
         saveUserDatabase();
         const { password: _, ...safeProfile } = updated;
         return res.json({ success: true, user: safeProfile });
-      }
+      } else {
+        // Create new persistent user record
+        const fallbackUsername = cleanUsername || `user_${Date.now()}`;
+        const newUser: StoredUser = {
+          id: targetId || `usr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+          username: fallbackUsername,
+          name: updates.name || fallbackUsername,
+          handle: updates.handle || `@${fallbackUsername}`,
+          avatarColor: updates.avatarColor || '#ec4899',
+          avatarUrl: updates.avatarUrl,
+          avatarMediaType: updates.avatarMediaType || 'image',
+          coverUrl: updates.coverUrl,
+          coverMediaType: updates.coverMediaType || 'image',
+          isAdmin: updates.isAdmin || false,
+          isVerified: updates.isVerified || false,
+          isVip: updates.isVip || false,
+          customTitle: updates.customTitle,
+          statusMessage: updates.statusMessage || 'Available on LiveCall',
+          customStatusEmoji: updates.customStatusEmoji || '🟢',
+          bio: updates.bio || 'Member of Pink Void LiveCall & Web Chat.',
+          preferredLanguage: updates.preferredLanguage || 'English',
+          autoTranslate: updates.autoTranslate !== undefined ? updates.autoTranslate : true,
+          createdAt: Date.now(),
+        };
 
-      res.status(404).json({ error: 'User not found in database.' });
+        userDb.set(fallbackUsername, newUser);
+        saveUserDatabase();
+        const { password: _, ...safeProfile } = newUser;
+        return res.json({ success: true, user: safeProfile });
+      }
     } catch (err: any) {
       console.error('Profile update error:', err);
       res.status(500).json({ error: 'Failed to update profile.' });
     }
+  });
+
+  // Get Room Messages History (Persistent)
+  app.get('/api/rooms/:roomId/messages', (req, res) => {
+    const { roomId } = req.params;
+    const msgs = roomMessagesDb.get(roomId) || rooms.get(roomId)?.messages || [];
+    res.json({ messages: msgs });
+  });
+
+  // Get DM Messages History (Persistent)
+  app.get('/api/dms/:partnerId', (req, res) => {
+    const { partnerId } = req.params;
+    const userId = req.query.userId as string;
+    if (!userId || !partnerId) {
+      return res.status(400).json({ error: 'userId and partnerId are required' });
+    }
+    const dmKey = getDmKey(userId, partnerId);
+    const msgs = dmStore.get(dmKey) || [];
+    res.json({ messages: msgs });
   });
 
   app.get('/api/rooms', (req, res) => {
@@ -571,10 +735,22 @@ Respond in STRICT JSON format matching this schema:
                 timestamp: Date.now(),
               };
               room.messages.push(chatMsg);
-              // Keep last 100 messages in memory
-              if (room.messages.length > 100) {
+              if (!roomMessagesDb.has(client.roomId)) {
+                roomMessagesDb.set(client.roomId, []);
+              }
+              roomMessagesDb.get(client.roomId)!.push(chatMsg);
+              
+              // Keep last 300 messages
+              if (room.messages.length > 300) {
                 room.messages.shift();
               }
+              if (roomMessagesDb.get(client.roomId)!.length > 300) {
+                roomMessagesDb.get(client.roomId)!.shift();
+              }
+
+              // Persist permanently to disk
+              saveRoomMessagesDebounced();
+
               broadcastToRoom(client.roomId, {
                 type: 'chat_message',
                 message: chatMsg,
@@ -600,9 +776,12 @@ Respond in STRICT JSON format matching this schema:
             }
             const history = dmStore.get(dmKey)!;
             history.push(chatMsg);
-            if (history.length > 150) {
+            if (history.length > 300) {
               history.shift();
             }
+
+            // Persist permanently to disk
+            saveDmMessagesDebounced();
 
             // Send to recipient
             sendDirectToUser(chatMsg.recipientId, {

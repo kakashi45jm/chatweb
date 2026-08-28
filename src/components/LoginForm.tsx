@@ -17,6 +17,7 @@ import {
 import { unlockAudio, getSafeAudioContext } from '../utils/legacyCompatibility';
 import { soundEffects } from '../utils/audioHelper';
 import { safeSetStorage, sanitizeUserForStorage } from '../utils/safeStorage';
+import { CyberTunnelBanner } from './CyberTunnelBanner';
 
 interface Props {
   initialRoomId: string;
@@ -226,26 +227,9 @@ export function LoginForm({ initialRoomId, diagnostics, onLogin }: Props) {
         {/* Pink Void Card with Aesthetic Header Banner */}
         <div className="bg-[#11131f]/95 backdrop-blur-xl rounded-3xl border border-pink-500/20 shadow-2xl shadow-pink-950/40 overflow-hidden">
           
-          {/* Looping Pink Void Video Banner */}
-          <div className="relative w-full h-44 sm:h-48 bg-slate-950 p-6 flex flex-col justify-end overflow-hidden border-b border-pink-500/20">
-            {/* Background Video Loop */}
-            <video
-              src="https://assets.mixkit.co/videos/preview/mixkit-tunnel-of-futuristic-neon-lights-41485-large.mp4"
-              autoPlay
-              loop
-              muted
-              playsInline
-              className="absolute inset-0 w-full h-full object-cover opacity-80 pointer-events-none scale-105"
-            />
-            
-            {/* Dark Neon Vignette & Gradient Overlay for optimal legibility */}
-            <div className="absolute inset-0 bg-gradient-to-t from-[#11131f] via-black/40 to-transparent pointer-events-none" />
-            <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_0%,rgba(0,0,0,0.6)_100%)] pointer-events-none" />
-
-            {/* Geometric Cyber Grid Overlay */}
-            <div className="absolute inset-0 bg-[linear-gradient(to_right,#ffffff08_1px,transparent_1px),linear-gradient(to_bottom,#ffffff08_1px,transparent_1px)] bg-[size:16px_16px] opacity-30 pointer-events-none" />
-
-            <div className="relative z-10 space-y-1">
+          {/* Looping Pink Void Cyber Tunnel Banner (Never Blank) */}
+          <CyberTunnelBanner>
+            <div className="space-y-1">
               <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-pink-500/30 backdrop-blur-md border border-pink-400/40 text-[10px] font-mono text-pink-200 font-bold uppercase tracking-wider shadow-sm">
                 <span className="w-1.5 h-1.5 rounded-full bg-pink-400 animate-pulse shadow-sm shadow-pink-400" />
                 LiveCall & Web Chat
@@ -259,7 +243,7 @@ export function LoginForm({ initialRoomId, diagnostics, onLogin }: Props) {
                 Ultra-fast Voice, Video & Text Communication
               </p>
             </div>
-          </div>
+          </CyberTunnelBanner>
 
           {/* Auth Card Content */}
           <div className="p-6 sm:p-7 space-y-5">

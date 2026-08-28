@@ -204,7 +204,10 @@ export default function App() {
             case 'room_state': {
               setCurrentRoomName(msg.room.name);
               setParticipants(msg.room.participants);
-              setMessages(msg.messages);
+              if (Array.isArray(msg.messages)) {
+                setMessages(msg.messages);
+                safeSetStorage(`livecall_room_msgs_${currentRoomId}`, JSON.stringify(msg.messages.slice(-50)));
+              }
               if (msg.activeCall) {
                 handleWSMessage({ type: 'call_initiate', call: msg.activeCall });
               }
@@ -245,7 +248,11 @@ export default function App() {
             }
 
             case 'chat_message': {
-              setMessages((prev) => [...prev, msg.message]);
+              setMessages((prev) => {
+                const next = [...prev, msg.message];
+                safeSetStorage(`livecall_room_msgs_${currentRoomId}`, JSON.stringify(next.slice(-50)));
+                return next;
+              });
               if (msg.message.senderId !== currentUser.id && !msg.message.isSystem) {
                 soundEffects.playMessageSound(false);
               }
@@ -259,9 +266,11 @@ export default function App() {
 
               setDmMessagesMap((prev) => {
                 const list = prev[partnerId] || [];
+                const next = [...list, chatMsg];
+                safeSetStorage(`livecall_dm_msgs_${partnerId}`, JSON.stringify(next.slice(-50)));
                 return {
                   ...prev,
-                  [partnerId]: [...list, chatMsg],
+                  [partnerId]: next,
                 };
               });
 
@@ -272,10 +281,13 @@ export default function App() {
             }
 
             case 'private_history': {
-              setDmMessagesMap((prev) => ({
-                ...prev,
-                [msg.partnerId]: msg.messages,
-              }));
+              setDmMessagesMap((prev) => {
+                safeSetStorage(`livecall_dm_msgs_${msg.partnerId}`, JSON.stringify(msg.messages.slice(-50)));
+                return {
+                  ...prev,
+                  [msg.partnerId]: msg.messages,
+                };
+              });
               break;
             }
 
@@ -379,22 +391,112 @@ export default function App() {
     safeSetStorage('livecall_username', updatedProfile.name);
     safeSetStorage('livecall_avatar_color', updatedProfile.avatarColor);
     
-    // Sync to database
+    // Sync permanently to backend database
     const username = updatedProfile.handle?.replace(/^@/, '') || updatedProfile.name;
     fetch('/api/auth/update-profile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         username,
+        userId: updatedProfile.id,
         updates: updatedProfile,
       }),
-    }).catch(() => {});
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && data.user) {
+          setCurrentUser((prev) => ({
+            ...prev,
+            ...data.user,
+            deviceType: data.user.isAdmin ? 'Admin' : prev.deviceType,
+          }));
+        }
+      })
+      .catch(() => {});
 
     sendWS({
       type: 'user_updated',
       user: updatedProfile,
     });
   };
+
+  // Restore Authoritative Profile from Backend on Initial Mount & Reconnect
+  useEffect(() => {
+    if (!isLoggedIn || !currentUser.id) return;
+    const lookupKey = currentUser.username || currentUser.handle?.replace(/^@/, '') || currentUser.name;
+    fetch(`/api/auth/me?id=${encodeURIComponent(currentUser.id)}&username=${encodeURIComponent(lookupKey)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && data.user) {
+          setCurrentUser((prev) => ({
+            ...prev,
+            ...data.user,
+            deviceType: data.user.isAdmin ? 'Admin' : prev.deviceType,
+          }));
+          const sanitized = sanitizeUserForStorage({
+            ...currentUser,
+            ...data.user,
+          });
+          safeSetStorage('livecall_auth_user', JSON.stringify(sanitized));
+        }
+      })
+      .catch(() => {});
+  }, [isLoggedIn]);
+
+  // Load Persistent Room Messages on Room Change & Startup
+  useEffect(() => {
+    if (!isLoggedIn || !currentRoomId) return;
+
+    // Load from local storage cache first for instant rendering
+    const cached = safeGetStorage(`livecall_room_msgs_${currentRoomId}`);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setMessages(parsed);
+        }
+      } catch {}
+    }
+
+    // Fetch latest persistent messages from backend
+    fetch(`/api/rooms/${encodeURIComponent(currentRoomId)}/messages`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && Array.isArray(data.messages) && data.messages.length > 0) {
+          setMessages(data.messages);
+          safeSetStorage(`livecall_room_msgs_${currentRoomId}`, JSON.stringify(data.messages.slice(-50)));
+        }
+      })
+      .catch(() => {});
+  }, [currentRoomId, isLoggedIn]);
+
+  // Load Persistent DM Messages when Opening 1v1 Direct Message
+  useEffect(() => {
+    if (!isLoggedIn || !activeDmPartner || !currentUser.id) return;
+    const partnerId = activeDmPartner.id;
+
+    // Load from local storage cache first for instant rendering
+    const cached = safeGetStorage(`livecall_dm_msgs_${partnerId}`);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setDmMessagesMap((prev) => ({ ...prev, [partnerId]: parsed }));
+        }
+      } catch {}
+    }
+
+    // Fetch latest persistent DMs from backend
+    fetch(`/api/dms/${encodeURIComponent(partnerId)}?userId=${encodeURIComponent(currentUser.id)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && Array.isArray(data.messages)) {
+          setDmMessagesMap((prev) => ({ ...prev, [partnerId]: data.messages }));
+          safeSetStorage(`livecall_dm_msgs_${partnerId}`, JSON.stringify(data.messages.slice(-50)));
+        }
+      })
+      .catch(() => {});
+  }, [activeDmPartner?.id, currentUser.id, isLoggedIn]);
 
   // Switch Room (exits DM mode)
   const handleSwitchRoom = (newRoomId: string) => {

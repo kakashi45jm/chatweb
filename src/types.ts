@@ -6,6 +6,7 @@ export type StreamMode = 'webrtc' | 'legacy_relay' | 'auto';
 
 export interface UserProfile {
   id: string;
+  username?: string;
   name: string;
   handle?: string;
   email?: string;
