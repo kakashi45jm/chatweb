@@ -17,7 +17,6 @@ import {
 import { unlockAudio, getSafeAudioContext } from '../utils/legacyCompatibility';
 import { soundEffects } from '../utils/audioHelper';
 import { safeSetStorage, sanitizeUserForStorage } from '../utils/safeStorage';
-import { CyberTunnelBanner } from './CyberTunnelBanner';
 
 interface Props {
   initialRoomId: string;
@@ -215,11 +214,20 @@ export function LoginForm({ initialRoomId, diagnostics, onLogin }: Props) {
   return (
     <div className="min-h-screen bg-[#07070d] text-slate-100 flex flex-col justify-center items-center p-4 sm:p-6 relative overflow-hidden selection:bg-pink-500 selection:text-white">
       
-      {/* Pink Void Cyber Atmosphere Background */}
-      <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute -top-40 -left-40 w-96 h-96 bg-pink-600/15 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-purple-600/20 rounded-full blur-3xl" />
-        <div className="absolute inset-0 bg-[radial-gradient(#ec4899_1px,transparent_1px)] [background-size:24px_24px] opacity-10" />
+      {/* Pink Void Cyber Atmosphere Background with Pinterest Video Ambience */}
+      <div className="absolute inset-0 pointer-events-none overflow-hidden">
+        <video
+          src="/assets/login_video.mp4"
+          autoPlay
+          loop
+          muted
+          playsInline
+          className="absolute inset-0 w-full h-full object-cover opacity-20 filter blur-xl scale-110 pointer-events-none"
+        />
+        <div className="absolute -top-40 -left-40 w-96 h-96 bg-pink-600/20 rounded-full blur-3xl" />
+        <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-purple-600/25 rounded-full blur-3xl" />
+        <div className="absolute inset-0 bg-[#07070d]/70 backdrop-blur-[2px]" />
+        <div className="absolute inset-0 bg-[radial-gradient(#ec4899_1px,transparent_1px)] [background-size:24px_24px] opacity-15" />
       </div>
 
       <div className="w-full max-w-md relative z-10 space-y-6">
@@ -227,9 +235,30 @@ export function LoginForm({ initialRoomId, diagnostics, onLogin }: Props) {
         {/* Pink Void Card with Aesthetic Header Banner */}
         <div className="bg-[#11131f]/95 backdrop-blur-xl rounded-3xl border border-pink-500/20 shadow-2xl shadow-pink-950/40 overflow-hidden">
           
-          {/* Looping Pink Void Cyber Tunnel Banner (Never Blank) */}
-          <CyberTunnelBanner>
-            <div className="space-y-1">
+          {/* Header Video Banner (Only the user provided video) */}
+          <div className="relative w-full h-48 sm:h-56 bg-slate-950 p-6 flex flex-col justify-end overflow-hidden border-b border-pink-500/20">
+            {/* Pinterest Video Loop */}
+            <video
+              src="/assets/login_video.mp4"
+              autoPlay
+              loop
+              muted
+              playsInline
+              onError={(e) => {
+                const target = e.currentTarget;
+                if (target.src !== 'https://v1.pinimg.com/videos/iht/expMp4/46/39/9d/46399d7d0929e1d3ccbcb1052c15d5d9_720w.mp4') {
+                  target.src = 'https://v1.pinimg.com/videos/iht/expMp4/46/39/9d/46399d7d0929e1d3ccbcb1052c15d5d9_720w.mp4';
+                  target.play().catch(() => {});
+                }
+              }}
+              className="absolute inset-0 w-full h-full object-cover pointer-events-none scale-105 transition-opacity duration-700 opacity-90"
+            />
+            
+            {/* Subtle Gradient & Cyber Vignette for crystal-clear readability */}
+            <div className="absolute inset-0 bg-gradient-to-t from-[#11131f] via-black/30 to-transparent pointer-events-none" />
+            <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_0%,rgba(0,0,0,0.5)_100%)] pointer-events-none" />
+
+            <div className="relative z-10 space-y-1">
               <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-pink-500/30 backdrop-blur-md border border-pink-400/40 text-[10px] font-mono text-pink-200 font-bold uppercase tracking-wider shadow-sm">
                 <span className="w-1.5 h-1.5 rounded-full bg-pink-400 animate-pulse shadow-sm shadow-pink-400" />
                 LiveCall & Web Chat
@@ -243,7 +272,7 @@ export function LoginForm({ initialRoomId, diagnostics, onLogin }: Props) {
                 Ultra-fast Voice, Video & Text Communication
               </p>
             </div>
-          </CyberTunnelBanner>
+          </div>
 
           {/* Auth Card Content */}
           <div className="p-6 sm:p-7 space-y-5">

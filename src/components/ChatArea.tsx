@@ -117,6 +117,7 @@ export function ChatArea({
   const [aiSuggestion, setAiSuggestion] = useState<{ original: string; enhanced: string; translation?: string; notes?: string } | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputFieldRef = useRef<HTMLInputElement>(null);
   const mediaFileInputRef = useRef<HTMLInputElement>(null);
   const voiceTimerRef = useRef<any>(null);
   const typingTimeoutRef = useRef<any>(null);
@@ -141,12 +142,31 @@ export function ChatArea({
     }, 1500);
   };
 
-  const handleSendText = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputText.trim()) return;
+  const handleSendText = (e?: React.FormEvent | React.MouseEvent) => {
+    if (e) e.preventDefault();
+    const textToSend = (inputText || '').trim();
+    if (!textToSend) {
+      inputFieldRef.current?.focus();
+      return;
+    }
 
     soundEffects.playMessageSound(true);
-    onSendMessage(inputText.trim());
+    onSendMessage(textToSend);
+    setInputText('');
+    setShowEmojiPicker(false);
+    setShowPlusMenu(false);
+    setShowAIComposeBar(false);
+    setAiSuggestion(null);
+    onTyping(false);
+  };
+
+  const handleSendAISuggestion = () => {
+    if (!aiSuggestion?.enhanced) return;
+    const textToSend = aiSuggestion.enhanced.trim();
+    if (!textToSend) return;
+
+    soundEffects.playMessageSound(true);
+    onSendMessage(textToSend);
     setInputText('');
     setShowEmojiPicker(false);
     setShowPlusMenu(false);
@@ -158,6 +178,7 @@ export function ChatArea({
   const insertEmoji = (emoji: string) => {
     setInputText((prev) => prev + emoji);
     setShowEmojiPicker(false);
+    inputFieldRef.current?.focus();
   };
 
   // Handle Photo & Video Attachment
@@ -790,72 +811,91 @@ export function ChatArea({
 
       {/* AI Grammar Polish & Translation Compose Preview Box */}
       {showAIComposeBar && (
-        <div className="px-4 py-3 bg-[#131627] border-t border-pink-500/30 shadow-lg animate-in slide-in-from-bottom-2 duration-150">
-          <div className="flex items-center justify-between mb-1.5">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-pink-300">
-              <Sparkles className="w-4 h-4 text-pink-400" />
-              <span>Gemini AI Linguistic Assistant</span>
+        <div className="px-4 py-3.5 bg-[#131627] border-t border-pink-500/30 shadow-xl animate-in slide-in-from-bottom-2 duration-150">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2 text-xs font-bold text-pink-300">
+              <div className="w-5 h-5 rounded-lg bg-pink-600/30 flex items-center justify-center text-pink-400 border border-pink-500/40">
+                <Sparkles className="w-3.5 h-3.5 text-amber-300 animate-pulse" />
+              </div>
+              <span className="font-semibold tracking-wide">Gemini AI Grammar & Linguistic Assistant</span>
             </div>
             <button
               onClick={() => { setShowAIComposeBar(false); setAiSuggestion(null); }}
-              className="text-slate-400 hover:text-white p-1"
+              className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition"
+              title="Close AI Assistant"
             >
-              <X className="w-3.5 h-3.5" />
+              <X className="w-4 h-4" />
             </button>
           </div>
 
           {isAIPolishing ? (
-            <div className="py-2 flex items-center gap-2 text-xs text-pink-300 font-medium">
-              <div className="w-3 h-3 rounded-full border-2 border-pink-500 border-t-transparent animate-spin" />
-              <span>Gemini is analyzing grammar and crafting perfect translation...</span>
+            <div className="py-3 px-4 rounded-xl bg-pink-950/20 border border-pink-500/20 flex items-center gap-3 text-xs text-pink-200 font-medium">
+              <div className="w-4 h-4 rounded-full border-2 border-pink-500 border-t-transparent animate-spin shrink-0" />
+              <span>Sinusuri ng Gemini ang grammar at binubuo ang tamang sentence structure...</span>
             </div>
           ) : aiSuggestion ? (
-            <div className="space-y-2">
-              <div className="p-2.5 rounded-xl bg-black/40 border border-pink-500/30 text-xs sm:text-sm text-white font-medium leading-relaxed">
+            <div className="space-y-2.5">
+              <div className="p-3 rounded-xl bg-black/50 border border-pink-500/40 text-xs sm:text-sm text-white font-medium leading-relaxed shadow-inner">
+                <div className="text-[10px] text-pink-400 font-bold uppercase tracking-wider mb-1 flex items-center gap-1">
+                  <Wand2 className="w-3 h-3 text-pink-400" />
+                  <span>Grammar-Polished Output:</span>
+                </div>
                 {aiSuggestion.enhanced}
               </div>
+
               {aiSuggestion.notes && (
-                <div className="text-[11px] text-pink-300 italic">
-                  💡 {aiSuggestion.notes}
+                <div className="text-[11px] text-pink-300/90 bg-pink-950/30 px-3 py-1.5 rounded-lg border border-pink-500/20 flex items-center gap-1.5">
+                  <span>💡</span>
+                  <span>{aiSuggestion.notes}</span>
                 </div>
               )}
-              <div className="flex items-center justify-end gap-2 pt-1">
+
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
                   onClick={applyAISuggestion}
-                  className="px-3 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-xs font-bold flex items-center gap-1 shadow-md shadow-pink-600/30 transition active:scale-95"
+                  className="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5 border border-slate-700 transition active:scale-95"
                 >
-                  <Check className="w-3.5 h-3.5" />
-                  <span>Use This Text</span>
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Use Text in Input</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSendAISuggestion}
+                  className="px-4 py-1.5 rounded-xl bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-pink-600/30 transition active:scale-95"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>Send Corrected Message</span>
                 </button>
               </div>
             </div>
           ) : (
-            <div className="space-y-2">
-              <p className="text-xs text-slate-400">
+            <div className="space-y-2.5">
+              <p className="text-xs text-slate-300">
                 {inputText.trim() 
-                  ? `Choose an action for: "${inputText.slice(0, 40)}${inputText.length > 40 ? '...' : ''}"`
-                  : 'Type a message first, then tap an AI feature below:'}
+                  ? `Pumili ng gagawin para sa: "${inputText.slice(0, 45)}${inputText.length > 45 ? '...' : ''}"`
+                  : 'Mag-type muna ng mensahe sa chat bar, o pumili ng mabilisang aksyon sa ibaba:'}
               </p>
               <div className="flex flex-wrap items-center gap-2 pt-1">
                 <button
                   type="button"
                   disabled={!inputText.trim()}
                   onClick={() => handlePolishComposeText('enhance')}
-                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white text-xs font-bold border border-slate-700 flex items-center gap-1.5 shadow-xs transition active:scale-95"
+                  className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-pink-600 hover:from-indigo-500 hover:to-pink-500 disabled:opacity-40 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-indigo-600/20 transition active:scale-95"
                 >
-                  <Wand2 className="w-3.5 h-3.5 text-pink-400" />
-                  <span>AI Fix Grammar & Polish</span>
+                  <Wand2 className="w-4 h-4 text-amber-300" />
+                  <span>✨ AI Fix Grammar & Spelling</span>
                 </button>
 
                 <button
                   type="button"
                   disabled={!inputText.trim()}
                   onClick={() => handlePolishComposeText('translate')}
-                  className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-pink-600/30 transition active:scale-95"
+                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-white text-xs font-bold border border-slate-700 flex items-center gap-1.5 shadow-xs transition active:scale-95"
                 >
-                  <Globe className="w-3.5 h-3.5" />
-                  <span>AI Translate to {selectedTargetLang}</span>
+                  <Globe className="w-4 h-4 text-purple-400" />
+                  <span>Translate to {selectedTargetLang}</span>
                 </button>
               </div>
             </div>
@@ -936,7 +976,31 @@ export function ChatArea({
               </div>
             </button>
 
-            {/* 2. AI Translate */}
+            {/* 2. AI Fix Grammar */}
+            <button
+              id="plus-action-ai-grammar"
+              type="button"
+              onClick={() => {
+                setShowPlusMenu(false);
+                setShowAIComposeBar(true);
+                if (inputText.trim()) {
+                  handlePolishComposeText('enhance');
+                } else {
+                  inputFieldRef.current?.focus();
+                }
+              }}
+              className="p-3 rounded-2xl bg-black/40 hover:bg-indigo-950/40 border border-slate-800 hover:border-indigo-500/40 text-left transition flex flex-col gap-1.5 active:scale-95 group"
+            >
+              <div className="w-8 h-8 rounded-xl bg-indigo-600/20 text-indigo-400 flex items-center justify-center group-hover:bg-indigo-600 group-hover:text-white transition">
+                <Wand2 className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="text-xs font-bold text-white block">AI Fix Grammar</span>
+                <span className="text-[10px] text-slate-400">Polish spelling & structure</span>
+              </div>
+            </button>
+
+            {/* 3. AI Translate */}
             <button
               id="plus-action-ai-translate"
               type="button"
@@ -945,6 +1009,8 @@ export function ChatArea({
                 setShowAIComposeBar(true);
                 if (inputText.trim()) {
                   handlePolishComposeText('translate');
+                } else {
+                  inputFieldRef.current?.focus();
                 }
               }}
               className="p-3 rounded-2xl bg-black/40 hover:bg-purple-950/40 border border-slate-800 hover:border-purple-500/40 text-left transition flex flex-col gap-1.5 active:scale-95 group"
@@ -955,28 +1021,6 @@ export function ChatArea({
               <div>
                 <span className="text-xs font-bold text-white block">AI Translate</span>
                 <span className="text-[10px] text-slate-400">Translate to {selectedTargetLang}</span>
-              </div>
-            </button>
-
-            {/* 3. AI Fix Grammar */}
-            <button
-              id="plus-action-ai-grammar"
-              type="button"
-              onClick={() => {
-                setShowPlusMenu(false);
-                setShowAIComposeBar(true);
-                if (inputText.trim()) {
-                  handlePolishComposeText('enhance');
-                }
-              }}
-              className="p-3 rounded-2xl bg-black/40 hover:bg-indigo-950/40 border border-slate-800 hover:border-indigo-500/40 text-left transition flex flex-col gap-1.5 active:scale-95 group"
-            >
-              <div className="w-8 h-8 rounded-xl bg-indigo-600/20 text-indigo-400 flex items-center justify-center group-hover:bg-indigo-600 group-hover:text-white transition">
-                <Wand2 className="w-4 h-4" />
-              </div>
-              <div>
-                <span className="text-xs font-bold text-white block">AI Fix Grammar</span>
-                <span className="text-[10px] text-slate-400">Polish spelling & clarity</span>
               </div>
             </button>
 
@@ -1009,7 +1053,7 @@ export function ChatArea({
             type="button"
             onClick={() => setShowPlusMenu(!showPlusMenu)}
             title="Add Media, AI Translation, Grammar Polish"
-            className={`p-2.5 rounded-2xl transition active:scale-95 flex items-center justify-center shadow-sm ${
+            className={`p-2.5 rounded-2xl transition active:scale-95 flex items-center justify-center shadow-sm shrink-0 ${
               showPlusMenu 
                 ? 'bg-pink-600 text-white shadow-pink-600/30' 
                 : 'bg-black/50 text-pink-400 hover:bg-pink-600 hover:text-white border border-pink-500/30'
@@ -1024,60 +1068,77 @@ export function ChatArea({
             type="button"
             onClick={() => setShowEmojiPicker(!showEmojiPicker)}
             title="Insert Emoji"
-            className="p-2.5 text-slate-400 hover:text-pink-400 hover:bg-slate-800/60 rounded-xl transition"
+            className="p-2.5 text-slate-400 hover:text-pink-400 hover:bg-slate-800/60 rounded-xl transition shrink-0"
           >
             <Smile className="w-5 h-5" />
           </button>
 
           {/* Text Input Field */}
-          <input
-            id="chat-message-input"
-            type="text"
-            value={inputText}
-            onChange={handleInputChange}
-            placeholder={isDirectMessage && dmPartner ? `Message ${dmPartner.name}...` : 'Type a message...'}
-            className="flex-1 px-4 py-2.5 text-xs sm:text-sm bg-black/40 focus:bg-black/60 rounded-xl border border-slate-800 focus:border-pink-500 focus:ring-2 focus:ring-pink-500/20 outline-hidden transition text-white placeholder-slate-500"
-          />
-
-          {/* AI Quick Polish Icon if user has drafted text */}
-          {inputText.trim().length > 2 && (
-            <button
-              id="compose-ai-polish-btn"
-              type="button"
-              onClick={() => {
-                setShowAIComposeBar(!showAIComposeBar);
-                if (!showAIComposeBar) {
-                  handlePolishComposeText('enhance');
+          <div className="flex-1 relative flex items-center">
+            <input
+              ref={inputFieldRef}
+              id="chat-message-input"
+              type="text"
+              value={inputText}
+              onChange={handleInputChange}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSendText(e);
                 }
               }}
-              title="Fix Grammar & Translate with Gemini AI"
-              className="p-2 text-pink-400 hover:bg-pink-950/40 rounded-xl transition flex items-center gap-1 font-bold text-xs bg-pink-950/30 border border-pink-500/40"
-            >
-              <Sparkles className="w-4 h-4 text-amber-400" />
-              <span className="hidden sm:inline">AI Polish</span>
-            </button>
-          )}
+              placeholder={isDirectMessage && dmPartner ? `Message ${dmPartner.name}...` : 'Type a message...'}
+              className="w-full pl-4 pr-10 sm:pr-24 py-2.5 text-xs sm:text-sm bg-black/40 focus:bg-black/60 rounded-xl border border-slate-800 focus:border-pink-500 focus:ring-2 focus:ring-pink-500/20 outline-hidden transition text-white placeholder-slate-500"
+            />
 
-          {/* Send Button or Voice Note Button */}
-          {inputText.trim() ? (
+            {/* In-Input AI Grammar Fix Button (Always easily clickable) */}
             <button
-              id="send-message-btn"
-              type="submit"
-              className="p-2.5 rounded-xl bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 active:scale-95 text-white shadow-md shadow-pink-600/30 transition"
+              id="compose-ai-grammar-btn"
+              type="button"
+              onClick={() => {
+                setShowAIComposeBar(true);
+                if (inputText.trim()) {
+                  handlePolishComposeText('enhance');
+                } else {
+                  inputFieldRef.current?.focus();
+                }
+              }}
+              title="Fix Grammar with Gemini AI"
+              className="absolute right-2 px-2 py-1 rounded-lg bg-pink-950/60 hover:bg-pink-600 text-pink-300 hover:text-white border border-pink-500/30 transition flex items-center gap-1 text-[11px] font-bold active:scale-95 shadow-xs"
             >
-              <Send className="w-5 h-5" />
+              <Wand2 className="w-3.5 h-3.5 text-amber-300" />
+              <span className="hidden sm:inline">AI Grammar</span>
             </button>
-          ) : (
+          </div>
+
+          {/* Voice Memo Shortcut Button */}
+          {!inputText.trim() && (
             <button
               id="record-voice-btn"
               type="button"
               onClick={startVoiceRecording}
               title="Record Voice Note"
-              className="p-2.5 rounded-xl bg-black/40 hover:bg-pink-950/40 hover:text-pink-400 text-slate-400 active:scale-95 transition border border-slate-800"
+              className="p-2.5 rounded-xl bg-black/40 hover:bg-pink-950/40 hover:text-pink-400 text-slate-400 active:scale-95 transition border border-slate-800 shrink-0"
             >
               <Mic className="w-5 h-5" />
             </button>
           )}
+
+          {/* Send Button (ALWAYS visible and clickable) */}
+          <button
+            id="send-message-btn"
+            type="submit"
+            onClick={(e) => handleSendText(e)}
+            disabled={false}
+            title={inputText.trim() ? 'Send Message' : 'Type a message to send'}
+            className={`p-2.5 rounded-xl transition active:scale-95 flex items-center justify-center shrink-0 ${
+              inputText.trim()
+                ? 'bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 text-white shadow-lg shadow-pink-600/40 ring-1 ring-pink-400/50 cursor-pointer'
+                : 'bg-slate-800/80 text-slate-500 hover:text-pink-400 hover:bg-slate-800 border border-slate-700/60 cursor-pointer'
+            }`}
+          >
+            <Send className="w-5 h-5" />
+          </button>
 
         </form>
       </div>

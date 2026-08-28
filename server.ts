@@ -503,28 +503,30 @@ async function startServer() {
     res.json({ users: onlineList });
   });
 
-  // AI Translation & Grammar Polish API (Gemini 3.7 Flash)
+  // AI Translation & Grammar Polish API (Gemini 3.7 Flash with retry and graceful fallback)
   app.post('/api/ai/translate', async (req, res) => {
-    try {
-      const { text, targetLanguage = 'English', mode = 'translate', tone = 'conversational' } = req.body;
+    const { text, targetLanguage = 'English', mode = 'translate', tone = 'conversational' } = req.body || {};
 
-      if (!text || typeof text !== 'string' || !text.trim()) {
-        return res.status(400).json({ error: 'Text is required for translation.' });
-      }
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({ error: 'Text is required for translation.' });
+    }
 
-      const ai = getGeminiClient();
-      if (!ai) {
-        // High quality local fallback if key not configured
-        return res.json({
-          translatedText: text,
-          detectedLanguage: 'Auto',
-          targetLanguage,
-          grammarNotes: 'Gemini API key is configuring. Showing original text.',
-          isEnhanced: false,
-        });
-      }
+    const rawText = text.trim();
+    const ai = getGeminiClient();
 
-      const prompt = `You are a real-time multilingual translator and linguistic editor for a live messaging and calling app.
+    if (!ai) {
+      // High quality local fallback if key not configured
+      return res.json({
+        detectedLanguage: 'Auto',
+        translatedText: rawText,
+        originalEnhanced: rawText,
+        targetLanguage,
+        grammarNotes: 'Gemini API key is configuring. Showing original text.',
+        isEnhanced: false,
+      });
+    }
+
+    const prompt = `You are a real-time multilingual translator and linguistic editor for a live messaging and calling app.
 Task:
 1. Detect the source language.
 2. If mode is "translate": Translate the input text faithfully and accurately into ${targetLanguage}. Ensure correct grammar, natural native phrasing, perfect punctuation, and keep the tone ${tone}. Maintain emojis, code snippets, numbers, and proper nouns.
@@ -532,7 +534,7 @@ Task:
 4. If mode is "both": Provide both the grammatical polish in the original language and the high-accuracy translation into ${targetLanguage}.
 
 Input Text:
-"""${text.trim()}"""
+"""${rawText}"""
 
 Target Language: ${targetLanguage}
 Requested Mode: ${mode}
@@ -546,44 +548,73 @@ Respond in STRICT JSON format matching this schema:
   "isEnhanced": true
 }`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.3,
-        },
-      });
+    const modelsToTry = ['gemini-3.7-flash', 'gemini-flash-latest'];
+    let responseText = '';
+    let lastApiError: any = null;
 
-      const responseText = response.text || '{}';
-      let parsedResult: any;
+    for (const model of modelsToTry) {
+      if (responseText) break;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const response = await ai.models.generateContent({
+            model,
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+              temperature: 0.3,
+            },
+          });
+          if (response && response.text) {
+            responseText = response.text;
+            break;
+          }
+        } catch (err: any) {
+          lastApiError = err;
+          const errMsg = err?.message || String(err);
+          console.warn(`[Gemini API] Model ${model} attempt ${attempt} warning:`, errMsg);
+          if (errMsg.includes('503') || errMsg.includes('429') || errMsg.includes('high demand') || errMsg.includes('UNAVAILABLE')) {
+            // Short backoff delay before retry
+            await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+            continue;
+          }
+          break; // Switch to fallback model immediately for other errors
+        }
+      }
+    }
+
+    if (responseText) {
       try {
-        parsedResult = JSON.parse(responseText);
-      } catch {
-        parsedResult = {
-          detectedLanguage: 'Auto',
-          translatedText: responseText.replace(/```json|```/g, '').trim(),
+        const parsedResult = JSON.parse(responseText);
+        return res.json({
+          detectedLanguage: parsedResult.detectedLanguage || 'Auto',
+          translatedText: parsedResult.translatedText || rawText,
+          originalEnhanced: parsedResult.originalEnhanced || rawText,
+          grammarNotes: parsedResult.grammarNotes || '',
           targetLanguage,
           isEnhanced: true,
-        };
+        });
+      } catch {
+        return res.json({
+          detectedLanguage: 'Auto',
+          translatedText: responseText.replace(/```json|```/g, '').trim() || rawText,
+          originalEnhanced: rawText,
+          grammarNotes: '',
+          targetLanguage,
+          isEnhanced: true,
+        });
       }
-
-      res.json({
-        detectedLanguage: parsedResult.detectedLanguage || 'Auto',
-        translatedText: parsedResult.translatedText || text,
-        originalEnhanced: parsedResult.originalEnhanced,
-        grammarNotes: parsedResult.grammarNotes,
-        targetLanguage,
-        isEnhanced: true,
-      });
-    } catch (err: any) {
-      console.error('Gemini translation error:', err);
-      res.status(500).json({
-        error: 'Translation service encountered an error',
-        details: err?.message || 'Unknown error',
-        fallback: req.body.text,
-      });
     }
+
+    // Graceful fallback if Gemini is temporarily under extreme 503 load
+    console.error('Gemini translation temporarily unavailable after retries:', lastApiError?.message || lastApiError);
+    return res.json({
+      detectedLanguage: 'Auto',
+      translatedText: rawText,
+      originalEnhanced: rawText,
+      grammarNotes: 'AI service is experiencing high demand. Showing message as drafted.',
+      targetLanguage,
+      isEnhanced: false,
+    });
   });
 
   // WebSocket Server with explicit upgrade routing
