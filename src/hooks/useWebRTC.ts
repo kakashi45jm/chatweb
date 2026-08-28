@@ -363,10 +363,25 @@ export function useWebRTC({
     }
   }, [localStream, sendWS, userId]);
 
-  // Initiate Outgoing Call (Auto-selects Legacy Relay on older Safari / iPad mini 2)
-  const startCall = useCallback(async (type: CallType, targetMode?: 'webrtc' | 'legacy_relay') => {
+  // Initiate Outgoing Call (Auto-selects Legacy Relay on older Safari / iPad mini 2 or handles 1v1 direct calling)
+  const startCall = useCallback(async (
+    type: CallType, 
+    optionsOrMode?: 'webrtc' | 'legacy_relay' | { isPrivate?: boolean; recipientId?: string; recipientName?: string; mode?: 'webrtc' | 'legacy_relay' }
+  ) => {
     soundEffects.startRingtone(false);
     
+    let isPrivate = false;
+    let recipientId: string | undefined;
+    let targetMode: 'webrtc' | 'legacy_relay' | undefined;
+
+    if (typeof optionsOrMode === 'string') {
+      targetMode = optionsOrMode;
+    } else if (optionsOrMode && typeof optionsOrMode === 'object') {
+      isPrivate = !!optionsOrMode.isPrivate;
+      recipientId = optionsOrMode.recipientId;
+      targetMode = optionsOrMode.mode;
+    }
+
     // Auto-detect optimal mode
     let mode = targetMode;
     if (!mode) {
@@ -390,6 +405,8 @@ export function useWebRTC({
       startedAt: Date.now(),
       streamMode: mode,
       participants: [userId],
+      isPrivate,
+      recipientId,
     };
     setActiveCall(callState);
 

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChatMessage, UserProfile, StreamMode } from '../types';
+import { ChatMessage, UserProfile, StreamMode, TranslationData } from '../types';
 import { 
   Send, 
   Paperclip, 
@@ -12,16 +12,26 @@ import {
   Share2, 
   Cpu, 
   Volume2, 
-  VolumeX, 
   Play, 
   Pause, 
   Check, 
   CheckCheck,
-  Tablet,
-  Sparkles
+  Sparkles,
+  Globe,
+  Languages,
+  Wand2,
+  Lock,
+  ChevronDown,
+  Copy,
+  Info,
+  User,
+  X
 } from 'lucide-react';
+import { UserAvatar } from './UserAvatar';
 import { soundEffects } from '../utils/audioHelper';
 import { getSafeAudioContext, unlockAudio, pcmToWavBase64 } from '../utils/legacyCompatibility';
+import { requestAITranslation } from '../utils/aiTranslate';
+import { SUPPORTED_LANGUAGES } from './ProfileModal';
 
 interface Props {
   messages: ChatMessage[];
@@ -38,6 +48,10 @@ interface Props {
   onOpenDiagnostics: () => void;
   onTyping: (isTyping: boolean) => void;
   isLowMemoryMode: boolean;
+  isDirectMessage?: boolean;
+  dmPartner?: UserProfile;
+  onOpenUserProfile?: (user: UserProfile) => void;
+  preferredLanguage?: string;
 }
 
 export function ChatArea({
@@ -55,12 +69,24 @@ export function ChatArea({
   onOpenDiagnostics,
   onTyping,
   isLowMemoryMode,
+  isDirectMessage = false,
+  dmPartner,
+  onOpenUserProfile,
+  preferredLanguage = 'English',
 }: Props) {
   const [inputText, setInputText] = useState('');
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [voiceDuration, setVoiceDuration] = useState(0);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
+
+  // AI Translation & Grammar State
+  const [translatedMessages, setTranslatedMessages] = useState<{ [msgId: string]: TranslationData }>({});
+  const [translatingMsgIds, setTranslatingMsgIds] = useState<{ [msgId: string]: boolean }>({});
+  const [selectedTargetLang, setSelectedTargetLang] = useState<string>(preferredLanguage);
+  const [showAIComposeBar, setShowAIComposeBar] = useState<boolean>(false);
+  const [isAIPolishing, setIsAIPolishing] = useState<boolean>(false);
+  const [aiSuggestion, setAiSuggestion] = useState<{ original: string; enhanced: string; translation?: string; notes?: string } | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -79,7 +105,11 @@ export function ChatArea({
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, typingUsers]);
+  }, [messages, typingUsers, translatedMessages]);
+
+  useEffect(() => {
+    setSelectedTargetLang(preferredLanguage);
+  }, [preferredLanguage]);
 
   // Handle Typing Indicator
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -99,6 +129,8 @@ export function ChatArea({
     soundEffects.playMessageSound(true);
     onSendMessage(inputText.trim());
     setInputText('');
+    setAiSuggestion(null);
+    setShowAIComposeBar(false);
     onTyping(false);
   };
 
@@ -128,7 +160,7 @@ export function ChatArea({
     e.target.value = '';
   };
 
-  // Voice Note Recording (Supports both MediaRecorder & iOS 9 Web Audio PCM fallback)
+  // Voice Note Recording
   const startVoiceRecording = async () => {
     const ctx = getSafeAudioContext();
     unlockAudio(ctx);
@@ -141,7 +173,6 @@ export function ChatArea({
         setVoiceDuration((prev) => prev + 1);
       }, 1000);
 
-      // Check MediaRecorder support (iOS 14.5+) vs Web Audio ScriptProcessor (iOS 9.3.5)
       if (typeof window !== 'undefined' && (window as any).MediaRecorder) {
         audioChunksRef.current = [];
         const recorder = new (window as any).MediaRecorder(stream);
@@ -171,7 +202,6 @@ export function ChatArea({
 
         recorder.start();
       } else {
-        // iOS 9.3.5 Web Audio PCM Fallback
         voiceAudioContextRef.current = ctx;
         if (ctx) {
           const source = ctx.createMediaStreamSource(stream);
@@ -192,7 +222,7 @@ export function ChatArea({
         }
       }
     } catch (err) {
-      alert('Microphone access is needed to record voice notes. Please check iPad settings.');
+      alert('Microphone access is needed to record voice notes. Please check device permissions.');
       setIsRecordingVoice(false);
     }
   };
@@ -205,7 +235,6 @@ export function ChatArea({
     if (mediaRecorderRef.current && mediaRecorderRef.current.stop) {
       mediaRecorderRef.current.stop();
     } else if (voiceAudioContextRef.current && voiceScriptNodeRef.current) {
-      // Legacy WAV export
       voiceScriptNodeRef.current.disconnect();
       const samples = new Float32Array(voicePcmSamplesRef.current);
       const wavBase64 = pcmToWavBase64(samples, voiceAudioContextRef.current.sampleRate);
@@ -263,37 +292,155 @@ export function ChatArea({
     });
   };
 
+  // Translate a received or sent chat message using Gemini AI
+  const handleTranslateMessage = async (msg: ChatMessage, customLang?: string) => {
+    const targetLang = customLang || selectedTargetLang || 'English';
+    const msgId = msg.id;
+
+    // Toggle off if already showing translation in the same language
+    if (translatedMessages[msgId] && translatedMessages[msgId].targetLanguage === targetLang) {
+      const updated = { ...translatedMessages };
+      delete updated[msgId];
+      setTranslatedMessages(updated);
+      return;
+    }
+
+    setTranslatingMsgIds((prev) => ({ ...prev, [msgId]: true }));
+    try {
+      const result = await requestAITranslation({
+        text: msg.text,
+        targetLanguage: targetLang,
+        mode: 'translate',
+      });
+      setTranslatedMessages((prev) => ({
+        ...prev,
+        [msgId]: result,
+      }));
+    } finally {
+      setTranslatingMsgIds((prev) => ({ ...prev, [msgId]: false }));
+    }
+  };
+
+  // Pre-Send Compose Polish & Translate
+  const handlePolishComposeText = async (mode: 'enhance' | 'translate') => {
+    if (!inputText.trim()) return;
+
+    setIsAIPolishing(true);
+    setShowAIComposeBar(true);
+    try {
+      const result = await requestAITranslation({
+        text: inputText.trim(),
+        targetLanguage: selectedTargetLang || 'English',
+        mode: mode === 'enhance' ? 'enhance' : 'translate',
+      });
+
+      setAiSuggestion({
+        original: inputText.trim(),
+        enhanced: result.translatedText,
+        translation: mode === 'translate' ? result.translatedText : undefined,
+        notes: result.grammarNotes,
+      });
+    } finally {
+      setIsAIPolishing(false);
+    }
+  };
+
+  const applyAISuggestion = () => {
+    if (aiSuggestion?.enhanced) {
+      setInputText(aiSuggestion.enhanced);
+      setAiSuggestion(null);
+      setShowAIComposeBar(false);
+    }
+  };
+
+  const findParticipant = (senderId: string) => {
+    if (dmPartner && dmPartner.id === senderId) return dmPartner;
+    return participants.find((p) => p.id === senderId);
+  };
+
   return (
     <div id="chat-main-pane" className="flex flex-col h-full bg-slate-50 relative overflow-hidden">
       
       {/* Top Navigation & Action Bar */}
       <header className="flex items-center justify-between px-4 py-3 bg-white border-b border-slate-200 shadow-xs z-10">
         <div className="flex items-center space-x-3 min-w-0">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center font-bold text-white shadow-xs">
-            {roomName.charAt(0).toUpperCase()}
-          </div>
+          
+          {/* Avatar / Room Icon */}
+          {isDirectMessage && dmPartner ? (
+            <div 
+              onClick={() => onOpenUserProfile && onOpenUserProfile(dmPartner)}
+              className="cursor-pointer group shrink-0"
+              title="Click to view profile"
+            >
+              <UserAvatar
+                user={dmPartner}
+                showOnlineDot={true}
+                isOnline={true}
+                size="lg"
+                shape="rounded-2xl"
+                className="group-hover:ring-2 group-hover:ring-blue-500 transition"
+              />
+            </div>
+          ) : (
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center font-bold text-white shadow-xs shrink-0">
+              {roomName.charAt(0).toUpperCase()}
+            </div>
+          )}
+
           <div className="min-w-0">
-            <h1 className="text-sm sm:text-base font-bold text-slate-900 truncate flex items-center gap-1.5">
-              <span>{roomName}</span>
-              {streamModePreference === 'legacy_relay' && (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-medium">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                  Safari Relay Auto
-                </span>
+            <div className="flex items-center gap-1.5">
+              <h1 
+                onClick={() => isDirectMessage && dmPartner && onOpenUserProfile && onOpenUserProfile(dmPartner)}
+                className={`text-sm sm:text-base font-bold text-slate-900 truncate flex items-center gap-1.5 ${
+                  isDirectMessage ? 'cursor-pointer hover:text-blue-600 transition' : ''
+                }`}
+              >
+                <span>{isDirectMessage && dmPartner ? dmPartner.name : roomName}</span>
+                {isDirectMessage && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-blue-100 text-blue-800 text-[10px] font-bold">
+                    <Lock className="w-2.5 h-2.5" /> 1v1 Private
+                  </span>
+                )}
+              </h1>
+            </div>
+
+            <div className="text-[11px] text-slate-500 flex items-center gap-1.5 truncate">
+              {isDirectMessage && dmPartner ? (
+                <>
+                  <span>{dmPartner.customStatusEmoji || '🟢'}</span>
+                  <span className="truncate">{dmPartner.statusMessage || dmPartner.deviceType}</span>
+                </>
+              ) : (
+                <>
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                  <span>{participants.length} online</span>
+                  <span className="text-slate-300">•</span>
+                  <span className="font-mono text-slate-400">#{roomId.substring(0, 6)}</span>
+                </>
               )}
-            </h1>
-            <p className="text-[11px] text-slate-500 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
-              <span>{participants.length} online</span>
-              <span className="text-slate-300">•</span>
-              <span className="font-mono text-slate-400">#{roomId.substring(0, 6)}</span>
-            </p>
+            </div>
           </div>
         </div>
 
-        {/* Action Buttons: Audio Call, Video Call, Invite, Diagnostics */}
+        {/* Action Buttons */}
         <div className="flex items-center space-x-1.5 sm:space-x-2">
           
+          {/* Target Language Dropdown Chip */}
+          <div className="hidden md:flex items-center gap-1 px-2 py-1 rounded-xl bg-slate-100 text-slate-700 text-xs font-semibold border border-slate-200">
+            <Globe className="w-3.5 h-3.5 text-blue-600" />
+            <select
+              value={selectedTargetLang}
+              onChange={(e) => setSelectedTargetLang(e.target.value)}
+              className="bg-transparent text-xs font-semibold text-slate-700 outline-hidden cursor-pointer"
+            >
+              {SUPPORTED_LANGUAGES.map((lang) => (
+                <option key={lang.code} value={lang.code}>
+                  AI: {lang.code}
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* Audio Call Button */}
           <button
             id="start-audio-call-btn"
@@ -316,21 +463,23 @@ export function ChatArea({
             <span>Video Call</span>
           </button>
 
-          {/* Invite & QR */}
-          <button
-            id="open-invite-btn"
-            onClick={onOpenInvite}
-            title="Invite & QR Code"
-            className="p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition"
-          >
-            <Share2 className="w-4 h-4" />
-          </button>
+          {/* Invite & QR (Only for room) */}
+          {!isDirectMessage && (
+            <button
+              id="open-invite-btn"
+              onClick={onOpenInvite}
+              title="Invite & QR Code"
+              className="p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition"
+            >
+              <Share2 className="w-4 h-4" />
+            </button>
+          )}
 
           {/* Diagnostics Modal Trigger */}
           <button
             id="open-diagnostics-btn"
             onClick={onOpenDiagnostics}
-            title="iPad mini 2 & Device Diagnostics"
+            title="iPad & Hardware Diagnostics"
             className="p-2 rounded-xl text-slate-600 hover:text-blue-600 hover:bg-blue-50 transition"
           >
             <Cpu className="w-4 h-4 text-blue-600" />
@@ -343,12 +492,16 @@ export function ChatArea({
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center text-slate-400 space-y-3">
             <div className="w-14 h-14 rounded-2xl bg-blue-50 text-blue-500 flex items-center justify-center">
-              <Sparkles className="w-7 h-7" />
+              {isDirectMessage ? <Lock className="w-7 h-7" /> : <Sparkles className="w-7 h-7" />}
             </div>
             <div>
-              <h3 className="font-bold text-slate-700 text-sm">Welcome to {roomName}</h3>
+              <h3 className="font-bold text-slate-700 text-sm">
+                {isDirectMessage && dmPartner ? `Direct Message with ${dmPartner.name}` : `Welcome to ${roomName}`}
+              </h3>
               <p className="text-xs text-slate-500 mt-1 max-w-xs">
-                Real-time messaging, audio calls, and video calls ready. Share the room link to invite peers!
+                {isDirectMessage 
+                  ? 'End-to-end direct 1v1 conversation. Private messages and instant audio/video calling.'
+                  : 'Real-time messaging, audio calls, and video calls ready. Use Gemini AI for instant chat translation & grammar polish!'}
               </p>
             </div>
           </div>
@@ -356,6 +509,9 @@ export function ChatArea({
           messages.map((msg) => {
             const isMe = msg.senderId === currentUserId;
             const isSystem = msg.isSystem;
+            const senderObj = findParticipant(msg.senderId);
+            const translation = translatedMessages[msg.id];
+            const isTranslating = translatingMsgIds[msg.id];
 
             if (isSystem) {
               return (
@@ -370,85 +526,153 @@ export function ChatArea({
             return (
               <div
                 key={msg.id}
-                className={`flex items-end gap-2 ${isMe ? 'justify-end' : 'justify-start'}`}
+                className={`flex items-end gap-2 group ${isMe ? 'justify-end' : 'justify-start'}`}
               >
                 {!isMe && (
-                  <div
-                    className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0 shadow-xs mb-1"
-                    style={{ backgroundColor: msg.senderAvatarColor || '#3b82f6' }}
+                  <button
+                    type="button"
+                    onClick={() => senderObj && onOpenUserProfile && onOpenUserProfile(senderObj)}
+                    className="shrink-0 mb-1 hover:ring-2 hover:ring-blue-400 rounded-full transition"
+                    title="View Profile"
                   >
-                    {msg.senderName.charAt(0).toUpperCase()}
-                  </div>
+                    <UserAvatar
+                      user={senderObj || undefined}
+                      name={msg.senderName}
+                      avatarColor={msg.senderAvatarColor || '#3b82f6'}
+                      avatarUrl={msg.senderAvatarUrl || senderObj?.avatarUrl}
+                      avatarMediaType={msg.senderAvatarMediaType || senderObj?.avatarMediaType}
+                      size="sm"
+                      shape="circle"
+                    />
+                  </button>
                 )}
 
-                <div className={`max-w-[80%] sm:max-w-[70%] space-y-1 ${isMe ? 'items-end' : 'items-start'}`}>
+                <div className={`max-w-[85%] sm:max-w-[75%] space-y-1 ${isMe ? 'items-end' : 'items-start'}`}>
                   {!isMe && (
-                    <div className="text-[11px] font-semibold text-slate-600 ml-1">
-                      {msg.senderName}
+                    <div 
+                      onClick={() => senderObj && onOpenUserProfile && onOpenUserProfile(senderObj)}
+                      className="text-[11px] font-semibold text-slate-600 ml-1 cursor-pointer hover:text-blue-600 flex items-center gap-1"
+                    >
+                      <span>{msg.senderName}</span>
+                      {senderObj?.customStatusEmoji && <span>{senderObj.customStatusEmoji}</span>}
                     </div>
                   )}
 
-                  <div
-                    className={`p-3 rounded-2xl text-xs sm:text-sm leading-relaxed shadow-xs ${
-                      isMe
-                        ? 'bg-blue-600 text-white rounded-br-xs'
-                        : 'bg-white text-slate-800 border border-slate-200/80 rounded-bl-xs'
-                    }`}
-                  >
-                    {/* Text content */}
-                    {msg.text && <p className="whitespace-pre-wrap break-words">{msg.text}</p>}
+                  {/* Message Bubble Container */}
+                  <div className="relative group/bubble">
+                    <div
+                      className={`p-3 rounded-2xl text-xs sm:text-sm leading-relaxed shadow-xs ${
+                        isMe
+                          ? 'bg-blue-600 text-white rounded-br-xs'
+                          : 'bg-white text-slate-800 border border-slate-200/80 rounded-bl-xs'
+                      }`}
+                    >
+                      {/* Text content */}
+                      {msg.text && <p className="whitespace-pre-wrap break-words">{msg.text}</p>}
 
-                    {/* Image Attachment */}
-                    {msg.attachment?.type === 'image' && (
-                      <div className="mt-1 rounded-xl overflow-hidden border border-black/10">
-                        <img
-                          src={msg.attachment.url}
-                          alt={msg.attachment.name || 'Attachment'}
-                          className="max-h-64 w-auto rounded-lg object-contain bg-slate-900/10"
-                        />
-                      </div>
-                    )}
-
-                    {/* Voice Note Audio Attachment */}
-                    {msg.attachment?.type === 'audio' && (
-                      <div className={`flex items-center gap-3 p-2 rounded-xl min-w-[200px] ${
-                        isMe ? 'bg-blue-700/60' : 'bg-slate-100'
-                      }`}>
-                        <button
-                          id={`play-audio-${msg.id}`}
-                          onClick={() => togglePlayAudio(msg.id, msg.attachment!.url)}
-                          className={`w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0 transition active:scale-95 ${
-                            isMe ? 'bg-white text-blue-700' : 'bg-blue-600'
-                          }`}
-                        >
-                          {playingAudioId === msg.id ? (
-                            <Pause className="w-4 h-4 fill-current" />
-                          ) : (
-                            <Play className="w-4 h-4 fill-current ml-0.5" />
-                          )}
-                        </button>
-
-                        <div className="flex-1 space-y-1">
-                          <div className="flex items-center gap-0.5 h-4">
-                            {[30, 60, 40, 80, 50, 90, 35, 75, 45, 65, 30].map((h, i) => (
-                              <div
-                                key={i}
-                                className={`w-1 rounded-full ${
-                                  isMe ? 'bg-blue-200' : 'bg-slate-400'
-                                } ${playingAudioId === msg.id ? 'animate-pulse' : ''}`}
-                                style={{ height: `${h}%` }}
-                              />
-                            ))}
+                      {/* Gemini AI Translation Box */}
+                      {translation && (
+                        <div className={`mt-2 pt-2 border-t text-xs rounded-xl p-2.5 space-y-1 ${
+                          isMe 
+                            ? 'bg-blue-700/60 border-blue-400/30 text-blue-50' 
+                            : 'bg-indigo-50/90 border-indigo-200 text-indigo-950'
+                        }`}>
+                          <div className="flex items-center justify-between text-[10px] font-bold">
+                            <span className="flex items-center gap-1 text-indigo-600">
+                              <Sparkles className="w-3 h-3 text-amber-500" />
+                              Translated to {translation.targetLanguage} (Gemini AI)
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleTranslateMessage(msg)}
+                              className="opacity-70 hover:opacity-100 text-[10px] underline"
+                            >
+                              Hide
+                            </button>
                           </div>
-                          <div className={`text-[10px] ${isMe ? 'text-blue-200' : 'text-slate-500'}`}>
-                            Voice Note ({msg.attachment.duration || 1}s)
+                          
+                          <p className="font-medium text-xs sm:text-sm">{translation.translatedText}</p>
+                          
+                          {translation.grammarNotes && (
+                            <p className="text-[10px] opacity-75 italic flex items-center gap-1">
+                              <Info className="w-2.5 h-2.5 shrink-0" />
+                              {translation.grammarNotes}
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Image Attachment */}
+                      {msg.attachment?.type === 'image' && (
+                        <div className="mt-1 rounded-xl overflow-hidden border border-black/10">
+                          <img
+                            src={msg.attachment.url}
+                            alt={msg.attachment.name || 'Attachment'}
+                            className="max-h-64 w-auto rounded-lg object-contain bg-slate-900/10"
+                          />
+                        </div>
+                      )}
+
+                      {/* Voice Note Audio Attachment */}
+                      {msg.attachment?.type === 'audio' && (
+                        <div className={`flex items-center gap-3 p-2 rounded-xl min-w-[200px] ${
+                          isMe ? 'bg-blue-700/60' : 'bg-slate-100'
+                        }`}>
+                          <button
+                            id={`play-audio-${msg.id}`}
+                            onClick={() => togglePlayAudio(msg.id, msg.attachment!.url)}
+                            className={`w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0 transition active:scale-95 ${
+                              isMe ? 'bg-white text-blue-700' : 'bg-blue-600'
+                            }`}
+                          >
+                            {playingAudioId === msg.id ? (
+                              <Pause className="w-4 h-4 fill-current" />
+                            ) : (
+                              <Play className="w-4 h-4 fill-current ml-0.5" />
+                            )}
+                          </button>
+
+                          <div className="flex-1 space-y-1">
+                            <div className="flex items-center gap-0.5 h-4">
+                              {[30, 60, 40, 80, 50, 90, 35, 75, 45, 65, 30].map((h, i) => (
+                                <div
+                                  key={i}
+                                  className={`w-1 rounded-full ${
+                                    isMe ? 'bg-blue-200' : 'bg-slate-400'
+                                  } ${playingAudioId === msg.id ? 'animate-pulse' : ''}`}
+                                  style={{ height: `${h}%` }}
+                                />
+                              ))}
+                            </div>
+                            <div className={`text-[10px] ${isMe ? 'text-blue-200' : 'text-slate-500'}`}>
+                              Voice Note ({msg.attachment.duration || 1}s)
+                            </div>
                           </div>
                         </div>
+                      )}
+                    </div>
+
+                    {/* Quick Floating Action Icons (Translate, Copy) */}
+                    {msg.text && (
+                      <div className={`absolute top-0 opacity-0 group-hover/bubble:opacity-100 transition flex items-center gap-1 ${
+                        isMe ? 'right-full mr-2' : 'left-full ml-2'
+                      }`}>
+                        <button
+                          type="button"
+                          onClick={() => handleTranslateMessage(msg)}
+                          disabled={isTranslating}
+                          className="p-1 rounded-lg bg-white shadow-xs border border-slate-200 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 transition text-[10px] flex items-center gap-0.5"
+                          title={`Translate to ${selectedTargetLang} with Gemini AI`}
+                        >
+                          <Globe className={`w-3.5 h-3.5 ${isTranslating ? 'animate-spin text-indigo-600' : ''}`} />
+                          <span className="hidden sm:inline font-semibold">Translate</span>
+                        </button>
                       </div>
                     )}
                   </div>
 
-                  <div className={`flex items-center gap-1 text-[10px] text-slate-400 ${isMe ? 'justify-end pr-1' : 'pl-1'}`}>
+                  {/* Metadata line */}
+                  <div className={`flex items-center gap-1.5 text-[10px] text-slate-400 ${isMe ? 'justify-end pr-1' : 'pl-1'}`}>
                     <span>
                       {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </span>
@@ -475,10 +699,76 @@ export function ChatArea({
         <div ref={messagesEndRef} />
       </div>
 
+      {/* AI Grammar Polish & Translation Compose Preview Box */}
+      {showAIComposeBar && (
+        <div className="px-4 py-3 bg-gradient-to-r from-indigo-50 to-purple-50 border-t border-indigo-200/80 shadow-xs animate-in slide-in-from-bottom-2 duration-150">
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-900">
+              <Sparkles className="w-4 h-4 text-indigo-600" />
+              <span>Gemini AI Linguistic Assistant</span>
+            </div>
+            <button
+              onClick={() => setShowAIComposeBar(false)}
+              className="text-slate-400 hover:text-slate-600 p-1"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {isAIPolishing ? (
+            <div className="py-2 flex items-center gap-2 text-xs text-indigo-700 font-medium">
+              <div className="w-3 h-3 rounded-full border-2 border-indigo-600 border-t-transparent animate-spin" />
+              <span>Gemini is analyzing and perfecting grammar & translation...</span>
+            </div>
+          ) : aiSuggestion ? (
+            <div className="space-y-2">
+              <div className="p-2.5 rounded-xl bg-white border border-indigo-100 text-xs sm:text-sm text-slate-800 font-medium leading-relaxed">
+                {aiSuggestion.enhanced}
+              </div>
+              {aiSuggestion.notes && (
+                <div className="text-[11px] text-indigo-700 italic">
+                  💡 {aiSuggestion.notes}
+                </div>
+              )}
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={applyAISuggestion}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center gap-1 shadow-xs transition active:scale-95"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Use This Text</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => handlePolishComposeText('enhance')}
+                className="px-3 py-1.5 rounded-xl bg-white hover:bg-indigo-100 text-indigo-800 text-xs font-bold border border-indigo-200 flex items-center gap-1.5 shadow-2xs transition"
+              >
+                <Wand2 className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Fix Grammar & Polish</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handlePolishComposeText('translate')}
+                className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-2xs transition"
+              >
+                <Globe className="w-3.5 h-3.5" />
+                <span>Translate to {selectedTargetLang}</span>
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Quick Emojis Drawer */}
       {showEmojiPicker && (
         <div className="p-2 bg-white border-t border-slate-200 flex items-center justify-around text-xl shadow-xs">
-          {['😀', '😂', '👍', '❤️', '🎉', '🔥', '👋', '🙏', '🚀', '✨'].map((emoji) => (
+          {['😀', '😂', '👍', '❤️', '🎉', '🔥', '👋', '🙏', '🚀', '✨', '💯', '👏'].map((emoji) => (
             <button
               key={emoji}
               onClick={() => insertEmoji(emoji)}
@@ -550,13 +840,32 @@ export function ChatArea({
             <Smile className="w-5 h-5" />
           </button>
 
+          {/* AI Polish Button */}
+          {inputText.trim().length > 2 && (
+            <button
+              id="compose-ai-polish-btn"
+              type="button"
+              onClick={() => {
+                setShowAIComposeBar(!showAIComposeBar);
+                if (!showAIComposeBar) {
+                  handlePolishComposeText('enhance');
+                }
+              }}
+              title="Fix Grammar & Translate with Gemini AI"
+              className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-xl transition flex items-center gap-1 font-bold text-xs bg-indigo-50/60 border border-indigo-200/80"
+            >
+              <Sparkles className="w-4 h-4 text-amber-500" />
+              <span className="hidden sm:inline">AI Polish</span>
+            </button>
+          )}
+
           {/* Text Input */}
           <input
             id="chat-message-input"
             type="text"
             value={inputText}
             onChange={handleInputChange}
-            placeholder="Type a message..."
+            placeholder={isDirectMessage && dmPartner ? `Message ${dmPartner.name}...` : 'Type a message...'}
             className="flex-1 px-4 py-2.5 text-xs sm:text-sm bg-slate-100 focus:bg-white rounded-xl border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-hidden transition text-slate-800"
           />
 

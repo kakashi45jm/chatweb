@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { UserProfile, ChatMessage, RoomInfo, StreamMode, WSMessage } from './types';
+import { UserProfile, ChatMessage, RoomInfo, StreamMode, WSMessage, DirectMessageThread } from './types';
 import { useWebRTC } from './hooks/useWebRTC';
 import { runDeviceDiagnostics, unlockAudio, getSafeAudioContext, autoEnableOlderSafariCompatibility } from './utils/legacyCompatibility';
 import { soundEffects } from './utils/audioHelper';
@@ -10,6 +10,8 @@ import { IncomingCallBanner } from './components/IncomingCallBanner';
 import { CompatibilityDiagnostics } from './components/CompatibilityDiagnostics';
 import { InviteModal } from './components/InviteModal';
 import { LoginForm } from './components/LoginForm';
+import { ProfileModal } from './components/ProfileModal';
+import { UserAvatar } from './components/UserAvatar';
 import { Menu, X, Radio, Tablet, Sparkles, CheckCircle, Volume2, Cpu, LogOut } from 'lucide-react';
 
 const INITIAL_COLORS = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4'];
@@ -31,7 +33,7 @@ export default function App() {
 
   // User Profile
   const [currentUser, setCurrentUser] = useState<UserProfile>(() => {
-    let savedUserObj: UserProfile | null = null;
+    let savedUserObj: any = null;
     if (typeof localStorage !== 'undefined') {
       const raw = localStorage.getItem('livecall_auth_user');
       if (raw) {
@@ -53,11 +55,23 @@ export default function App() {
       ? 'Older Safari'
       : 'Web Client';
 
+    const defaultName = savedName || `Guest ${Math.floor(1000 + Math.random() * 9000)}`;
+
     return {
       id: savedUserObj?.id || `usr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-      name: savedName || `Guest ${Math.floor(1000 + Math.random() * 9000)}`,
+      name: defaultName,
+      handle: savedUserObj?.handle || `@${defaultName.toLowerCase().replace(/[^a-z0-9]/g, '')}`,
       email: savedUserObj?.email,
       avatarColor: savedColor || INITIAL_COLORS[Math.floor(Math.random() * INITIAL_COLORS.length)],
+      avatarUrl: savedUserObj?.avatarUrl,
+      avatarMediaType: savedUserObj?.avatarMediaType || 'image',
+      coverUrl: savedUserObj?.coverUrl,
+      coverMediaType: savedUserObj?.coverMediaType || 'image',
+      statusMessage: savedUserObj?.statusMessage || 'Available on LiveCall',
+      customStatusEmoji: savedUserObj?.customStatusEmoji || '🟢',
+      bio: savedUserObj?.bio || 'Real-time calling and messaging enthusiast.',
+      preferredLanguage: savedUserObj?.preferredLanguage || 'English',
+      autoTranslate: savedUserObj?.autoTranslate ?? true,
       deviceType: deviceName,
       isIosLegacy: diagnostics.isiOS && (diagnostics.iosVersion ? parseFloat(diagnostics.iosVersion) < 13 : true),
       joinedAt: Date.now(),
@@ -77,8 +91,18 @@ export default function App() {
   const [currentRoomName, setCurrentRoomName] = useState<string>('General Lobby');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [participants, setParticipants] = useState<UserProfile[]>([currentUser]);
+  const [onlineUsers, setOnlineUsers] = useState<UserProfile[]>([]);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
   const [isConnected, setIsConnected] = useState<boolean>(false);
+
+  // 1v1 Direct Messaging State
+  const [activeDmPartner, setActiveDmPartner] = useState<UserProfile | null>(null);
+  const [dmMessagesMap, setDmMessagesMap] = useState<{ [partnerId: string]: ChatMessage[] }>({});
+  const [dmTypingMap, setDmTypingMap] = useState<{ [partnerId: string]: boolean }>({});
+
+  // Profile Modal State
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState<boolean>(false);
+  const [viewingTargetProfile, setViewingTargetProfile] = useState<UserProfile | null>(null);
 
   // Settings & Modes (Auto-configured for older Safari / iPad mini 2)
   const [streamModePreference, setStreamModePreference] = useState<StreamMode>(
@@ -132,7 +156,7 @@ export default function App() {
     handleWSMessage,
   } = useWebRTC({
     userId: currentUser.id,
-    roomId: currentRoomId,
+    roomId: activeDmPartner ? `dm-${[currentUser.id, activeDmPartner.id].sort().join('-')}` : currentRoomId,
     sendWS,
     streamModePreference,
     isLowMemoryMode,
@@ -189,11 +213,30 @@ export default function App() {
                 if (prev.some((p) => p.id === msg.user.id)) return prev;
                 return [...prev, msg.user];
               });
+              setOnlineUsers((prev) => {
+                if (prev.some((p) => p.id === msg.user.id)) return prev;
+                return [...prev, msg.user];
+              });
+              break;
+            }
+
+            case 'user_updated': {
+              setParticipants((prev) => prev.map((p) => (p.id === msg.user.id ? msg.user : p)));
+              setOnlineUsers((prev) => {
+                if (prev.some((p) => p.id === msg.user.id)) {
+                  return prev.map((p) => (p.id === msg.user.id ? msg.user : p));
+                }
+                return [...prev, msg.user];
+              });
+              if (activeDmPartner && activeDmPartner.id === msg.user.id) {
+                setActiveDmPartner(msg.user);
+              }
               break;
             }
 
             case 'user_left': {
               setParticipants((prev) => prev.filter((p) => p.id !== msg.userId));
+              setOnlineUsers((prev) => prev.filter((p) => p.id !== msg.userId));
               setTypingUsers((prev) => prev.filter((u) => u !== msg.userId));
               break;
             }
@@ -206,11 +249,45 @@ export default function App() {
               break;
             }
 
+            // 1v1 Private Direct Message Received
+            case 'private_chat_message': {
+              const chatMsg = msg.message;
+              const partnerId = chatMsg.senderId === currentUser.id ? chatMsg.recipientId! : chatMsg.senderId;
+
+              setDmMessagesMap((prev) => {
+                const list = prev[partnerId] || [];
+                return {
+                  ...prev,
+                  [partnerId]: [...list, chatMsg],
+                };
+              });
+
+              if (chatMsg.senderId !== currentUser.id) {
+                soundEffects.playMessageSound(false);
+              }
+              break;
+            }
+
+            case 'private_history': {
+              setDmMessagesMap((prev) => ({
+                ...prev,
+                [msg.partnerId]: msg.messages,
+              }));
+              break;
+            }
+
             case 'typing': {
-              if (msg.isTyping) {
-                setTypingUsers((prev) => (prev.includes(msg.userName) ? prev : [...prev, msg.userName]));
-              } else {
-                setTypingUsers((prev) => prev.filter((u) => u !== msg.userName));
+              if (msg.isPrivate && msg.targetUserId === currentUser.id) {
+                setDmTypingMap((prev) => ({
+                  ...prev,
+                  [msg.userId]: msg.isTyping,
+                }));
+              } else if (!msg.isPrivate) {
+                if (msg.isTyping) {
+                  setTypingUsers((prev) => (prev.includes(msg.userName) ? prev : [...prev, msg.userName]));
+                } else {
+                  setTypingUsers((prev) => prev.filter((u) => u !== msg.userName));
+                }
               }
               break;
             }
@@ -239,7 +316,7 @@ export default function App() {
       console.warn('WebSocket connection init failed:', e);
       reconnectTimerRef.current = setTimeout(connectWebSocket, 3000);
     }
-  }, [currentRoomId, currentUser, handleWSMessage]);
+  }, [currentRoomId, currentUser, activeDmPartner, handleWSMessage]);
 
   useEffect(() => {
     if (!isLoggedIn) return;
@@ -293,37 +370,25 @@ export default function App() {
     };
   }, []);
 
-  // Update Username
-  const handleUpdateUserName = (newName: string) => {
-    const updated = { ...currentUser, name: newName };
-    setCurrentUser(updated);
+  // Update Profile (Name, Bio, Handle, Avatar, Language)
+  const handleSaveProfile = (updatedProfile: UserProfile) => {
+    setCurrentUser(updatedProfile);
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('livecall_username', newName);
+      localStorage.setItem('livecall_auth_user', JSON.stringify(updatedProfile));
+      localStorage.setItem('livecall_username', updatedProfile.name);
+      localStorage.setItem('livecall_avatar_color', updatedProfile.avatarColor);
     }
     sendWS({
-      type: 'join_room',
-      roomId: currentRoomId,
-      user: updated,
+      type: 'user_updated',
+      user: updatedProfile,
     });
   };
 
-  // Update Avatar Color
-  const handleUpdateAvatarColor = (color: string) => {
-    const updated = { ...currentUser, avatarColor: color };
-    setCurrentUser(updated);
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('livecall_avatar_color', color);
-    }
-    sendWS({
-      type: 'join_room',
-      roomId: currentRoomId,
-      user: updated,
-    });
-  };
-
-  // Switch Room
+  // Switch Room (exits DM mode)
   const handleSwitchRoom = (newRoomId: string) => {
+    setActiveDmPartner(null);
     if (newRoomId === currentRoomId) return;
+
     sendWS({ type: 'leave_room', roomId: currentRoomId });
     setCurrentRoomId(newRoomId);
     setCurrentRoomName(newRoomId.charAt(0).toUpperCase() + newRoomId.slice(1).replace(/-/g, ' '));
@@ -331,7 +396,6 @@ export default function App() {
     setParticipants([currentUser]);
     setIsMobileSidebarOpen(false);
 
-    // Update URL without full reload
     if (typeof window !== 'undefined' && window.history) {
       window.history.pushState({}, '', `?room=${newRoomId}`);
     }
@@ -343,31 +407,103 @@ export default function App() {
     });
   };
 
-  // Send Chat Message
-  const handleSendMessage = (text: string, attachment?: any) => {
-    const chatMsg: ChatMessage = {
-      id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-      roomId: currentRoomId,
-      senderId: currentUser.id,
-      senderName: currentUser.name,
-      senderAvatarColor: currentUser.avatarColor,
-      text,
-      attachment,
-      timestamp: Date.now(),
-    };
+  // Select 1v1 Direct Message Conversation
+  const handleSelectDirectMessage = (partner: UserProfile) => {
+    setActiveDmPartner(partner);
+    setIsMobileSidebarOpen(false);
 
+    // Request private message history if needed
     sendWS({
-      type: 'chat_message',
-      message: chatMsg,
+      type: 'get_private_history',
+      partnerId: partner.id,
     });
+  };
+
+  // Send Chat Message (handles both Room & 1v1 Direct Message)
+  const handleSendMessage = (text: string, attachment?: any) => {
+    if (activeDmPartner) {
+      // 1v1 Direct Message
+      const chatMsg: ChatMessage = {
+        id: `dm-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        roomId: `dm-${[currentUser.id, activeDmPartner.id].sort().join('-')}`,
+        senderId: currentUser.id,
+        senderName: currentUser.name,
+        senderAvatarColor: currentUser.avatarColor,
+        senderAvatarUrl: currentUser.avatarUrl,
+        senderAvatarMediaType: currentUser.avatarMediaType,
+        recipientId: activeDmPartner.id,
+        recipientName: activeDmPartner.name,
+        isPrivate: true,
+        text,
+        attachment,
+        timestamp: Date.now(),
+      };
+
+      sendWS({
+        type: 'private_chat_message',
+        message: chatMsg,
+      });
+    } else {
+      // Room Message
+      const chatMsg: ChatMessage = {
+        id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        roomId: currentRoomId,
+        senderId: currentUser.id,
+        senderName: currentUser.name,
+        senderAvatarColor: currentUser.avatarColor,
+        senderAvatarUrl: currentUser.avatarUrl,
+        senderAvatarMediaType: currentUser.avatarMediaType,
+        text,
+        attachment,
+        timestamp: Date.now(),
+      };
+
+      sendWS({
+        type: 'chat_message',
+        message: chatMsg,
+      });
+    }
   };
 
   // Broadcast Typing
   const handleTyping = (isTyping: boolean) => {
-    sendWS({
-      type: 'typing',
-      isTyping,
-    });
+    if (activeDmPartner) {
+      sendWS({
+        type: 'typing',
+        isTyping,
+        isPrivate: true,
+        targetUserId: activeDmPartner.id,
+      });
+    } else {
+      sendWS({
+        type: 'typing',
+        isTyping,
+      });
+    }
+  };
+
+  // Start 1v1 or Room Call
+  const handleStartCall = (type: 'audio' | 'video') => {
+    if (activeDmPartner) {
+      startCall(type, {
+        isPrivate: true,
+        recipientId: activeDmPartner.id,
+        recipientName: activeDmPartner.name,
+      });
+    } else {
+      startCall(type);
+    }
+  };
+
+  // Open Profile Modals
+  const handleOpenMyProfile = () => {
+    setViewingTargetProfile(null); // editing my profile
+    setIsProfileModalOpen(true);
+  };
+
+  const handleOpenUserProfile = (user: UserProfile) => {
+    setViewingTargetProfile(user);
+    setIsProfileModalOpen(true);
   };
 
   if (!isLoggedIn) {
@@ -379,6 +515,15 @@ export default function App() {
       />
     );
   }
+
+  // Active messages depending on Room vs 1v1 Direct Message
+  const activeMessageList = activeDmPartner
+    ? dmMessagesMap[activeDmPartner.id] || []
+    : messages;
+
+  const activeTypingList = activeDmPartner
+    ? dmTypingMap[activeDmPartner.id] ? [activeDmPartner.name] : []
+    : typingUsers;
 
   return (
     <div id="livecall-app-root" className="flex h-screen w-screen overflow-hidden bg-slate-900 font-sans select-none antialiased">
@@ -400,12 +545,16 @@ export default function App() {
 
         <div className="flex items-center gap-2">
           <button
-            id="mobile-logout-btn"
-            onClick={handleLogout}
-            className="p-1 text-slate-400 hover:text-red-400"
-            title="Sign Out"
+            id="mobile-profile-btn"
+            onClick={handleOpenMyProfile}
+            className="cursor-pointer"
+            title="My Profile"
           >
-            <LogOut className="w-4 h-4" />
+            <UserAvatar
+              user={currentUser}
+              size="sm"
+              shape="circle"
+            />
           </button>
           <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-amber-500'}`} />
         </div>
@@ -420,11 +569,16 @@ export default function App() {
         <Sidebar
           currentUser={currentUser}
           participants={participants}
+          onlineUsers={onlineUsers}
           currentRoomId={currentRoomId}
           currentRoomName={currentRoomName}
-          onUpdateUserName={handleUpdateUserName}
-          onUpdateAvatarColor={handleUpdateAvatarColor}
+          activeDmPartnerId={activeDmPartner?.id || null}
+          onUpdateUserName={(newName) => handleSaveProfile({ ...currentUser, name: newName })}
+          onUpdateAvatarColor={(newColor) => handleSaveProfile({ ...currentUser, avatarColor: newColor })}
           onSwitchRoom={handleSwitchRoom}
+          onSelectDirectMessage={handleSelectDirectMessage}
+          onOpenMyProfile={handleOpenMyProfile}
+          onOpenUserProfile={handleOpenUserProfile}
           onOpenDiagnostics={() => setIsDiagnosticsOpen(true)}
           isLowMemoryMode={isLowMemoryMode}
           onToggleLowMemory={() => setIsLowMemoryMode(!isLowMemoryMode)}
@@ -444,6 +598,7 @@ export default function App() {
 
       {/* Main Chat & Interactive Canvas Area */}
       <main className="flex-1 flex flex-col h-full pt-12 sm:pt-0 overflow-hidden bg-slate-50">
+        
         {/* Older Safari Auto-Enable Compatibility Bar */}
         {showAutoSafariBanner && (
           <div id="safari-compat-banner" className="bg-emerald-900/90 text-emerald-100 px-4 py-2 text-xs flex flex-wrap items-center justify-between gap-2 border-b border-emerald-700/50">
@@ -479,20 +634,24 @@ export default function App() {
         )}
 
         <ChatArea
-          messages={messages}
+          messages={activeMessageList}
           currentUserId={currentUser.id}
           currentUserName={currentUser.name}
           roomName={currentRoomName}
           roomId={currentRoomId}
           participants={participants}
-          typingUsers={typingUsers}
+          typingUsers={activeTypingList}
           streamModePreference={streamModePreference}
           onSendMessage={handleSendMessage}
-          onStartCall={startCall}
+          onStartCall={handleStartCall}
           onOpenInvite={() => setIsInviteOpen(true)}
           onOpenDiagnostics={() => setIsDiagnosticsOpen(true)}
           onTyping={handleTyping}
           isLowMemoryMode={isLowMemoryMode}
+          isDirectMessage={!!activeDmPartner}
+          dmPartner={activeDmPartner || undefined}
+          onOpenUserProfile={handleOpenUserProfile}
+          preferredLanguage={currentUser.preferredLanguage || 'English'}
         />
       </main>
 
@@ -526,6 +685,26 @@ export default function App() {
         onSwitchCamera={switchCamera}
         onEndCall={endCall}
         isLowMemoryMode={isLowMemoryMode}
+      />
+
+      {/* User Profile / Edit Profile Modal */}
+      <ProfileModal
+        isOpen={isProfileModalOpen}
+        onClose={() => setIsProfileModalOpen(false)}
+        currentUser={currentUser}
+        targetUser={viewingTargetProfile}
+        onSaveProfile={handleSaveProfile}
+        onStartDirectMessage={(partner) => {
+          handleSelectDirectMessage(partner);
+        }}
+        onStart1v1Call={(partner, callType) => {
+          setActiveDmPartner(partner);
+          startCall(callType, {
+            isPrivate: true,
+            recipientId: partner.id,
+            recipientName: partner.name,
+          });
+        }}
       />
 
       {/* iPad mini 2 & iOS 9.3.5 Hardware Diagnostics Modal */}
