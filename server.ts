@@ -1,9 +1,91 @@
 import express from 'express';
 import http from 'http';
 import path from 'path';
+import fs from 'fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
+
+// Database directory & persistent users store
+const DATA_DIR = path.join(process.cwd(), 'data');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+
+interface StoredUser {
+  id: string;
+  username: string;
+  password?: string;
+  name: string;
+  handle: string;
+  avatarColor: string;
+  avatarUrl?: string;
+  avatarMediaType?: 'image' | 'video';
+  coverUrl?: string;
+  coverMediaType?: 'image' | 'video';
+  isAdmin?: boolean;
+  isVerified?: boolean;
+  isVip?: boolean;
+  customTitle?: string;
+  statusMessage?: string;
+  customStatusEmoji?: string;
+  bio?: string;
+  createdAt: number;
+}
+
+// Ensure data folder and load users
+let userDb = new Map<string, StoredUser>();
+
+function initUserDatabase() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(USERS_FILE)) {
+      const raw = fs.readFileSync(USERS_FILE, 'utf-8');
+      const list: StoredUser[] = JSON.parse(raw);
+      for (const u of list) {
+        userDb.set(u.username.toLowerCase(), u);
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load user database:', err);
+  }
+
+  // Ensure Admin account exists in database
+  if (!userDb.has('beneqt23')) {
+    const adminUser: StoredUser = {
+      id: 'usr-admin-beneqt23',
+      username: 'beneqt23',
+      password: 'kaizen12',
+      name: 'joo',
+      handle: '@beneqt23',
+      avatarColor: '#ec4899',
+      isAdmin: true,
+      isVerified: true,
+      isVip: true,
+      customTitle: 'Founder & Administrator',
+      statusMessage: '⚡ LiveCall Administrator',
+      customStatusEmoji: '👑',
+      bio: 'Official LiveCall System Administrator & Founder.',
+      createdAt: Date.now(),
+    };
+    userDb.set('beneqt23', adminUser);
+    saveUserDatabase();
+  }
+}
+
+function saveUserDatabase() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    const list = Array.from(userDb.values());
+    fs.writeFileSync(USERS_FILE, JSON.stringify(list, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to save user database:', err);
+  }
+}
+
+initUserDatabase();
 
 interface ClientConnection {
   ws: WebSocket;
@@ -30,6 +112,8 @@ const dmStore = new Map<string, any[]>();
 function getDmKey(userA: string, userB: string): string {
   return [userA, userB].sort().join(':::');
 }
+
+let currentAnnouncement: string = 'Welcome to LiveCall Web - Ultra-fast Voice, Video & Text Communication';
 
 function getOrCreateRoom(roomId: string, roomName?: string): RoomState {
   if (!rooms.has(roomId)) {
@@ -114,6 +198,129 @@ async function startServer() {
       hasGeminiKey: !!process.env.GEMINI_API_KEY,
       timestamp: Date.now(),
     });
+  });
+
+  // User Registration Endpoint
+  app.post('/api/auth/register', (req, res) => {
+    try {
+      const { username, password, name, avatarColor } = req.body;
+      if (!username || typeof username !== 'string' || !username.trim()) {
+        return res.status(400).json({ error: 'Username is required.' });
+      }
+      if (!password || typeof password !== 'string' || password.length < 4) {
+        return res.status(400).json({ error: 'Password must be at least 4 characters.' });
+      }
+
+      const cleanUsername = username.trim().toLowerCase().replace(/^@/, '');
+      if (userDb.has(cleanUsername)) {
+        return res.status(409).json({ error: 'Username is already taken. Please choose another or sign in.' });
+      }
+
+      const displayName = (name && typeof name === 'string' && name.trim()) ? name.trim() : username.trim();
+      const colors = ['#ec4899', '#8b5cf6', '#3b82f6', '#10b981', '#f59e0b', '#06b6d4'];
+      const chosenColor = avatarColor || colors[Math.floor(Math.random() * colors.length)];
+
+      const newUser: StoredUser = {
+        id: `usr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        username: cleanUsername,
+        password: password,
+        name: displayName,
+        handle: `@${cleanUsername}`,
+        avatarColor: chosenColor,
+        isAdmin: false,
+        isVerified: false,
+        isVip: false,
+        statusMessage: 'Available on LiveCall',
+        customStatusEmoji: '🟢',
+        bio: 'Member of Pink Void LiveCall & Web Chat.',
+        createdAt: Date.now(),
+      };
+
+      userDb.set(cleanUsername, newUser);
+      saveUserDatabase();
+
+      // Return public profile (exclude raw password from return or return safely)
+      const { password: _, ...safeProfile } = newUser;
+      res.json({
+        success: true,
+        message: 'Account created successfully and saved to database.',
+        user: safeProfile,
+      });
+    } catch (err: any) {
+      console.error('Registration error:', err);
+      res.status(500).json({ error: 'Failed to create account.' });
+    }
+  });
+
+  // User Login Endpoint
+  app.post('/api/auth/login', (req, res) => {
+    try {
+      const { username, password } = req.body;
+      if (!username || !password) {
+        return res.status(400).json({ error: 'Username and password are required.' });
+      }
+
+      const cleanUsername = username.trim().toLowerCase().replace(/^@/, '');
+      const existingUser = userDb.get(cleanUsername);
+
+      if (!existingUser) {
+        return res.status(401).json({ error: 'Account not found. Please register first.' });
+      }
+
+      if (existingUser.password && existingUser.password !== password) {
+        return res.status(401).json({ error: 'Incorrect password. Please try again.' });
+      }
+
+      const { password: _, ...safeProfile } = existingUser;
+      res.json({
+        success: true,
+        message: 'Login successful.',
+        user: safeProfile,
+      });
+    } catch (err: any) {
+      console.error('Login error:', err);
+      res.status(500).json({ error: 'Login failed.' });
+    }
+  });
+
+  // User Profile Update Sync Endpoint
+  app.post('/api/auth/update-profile', (req, res) => {
+    try {
+      const { username, updates } = req.body;
+      if (!username || !updates) {
+        return res.status(400).json({ error: 'Username and updates are required.' });
+      }
+
+      const cleanUsername = username.trim().toLowerCase().replace(/^@/, '');
+      const existingUser = userDb.get(cleanUsername);
+
+      if (existingUser) {
+        const updated: StoredUser = {
+          ...existingUser,
+          name: updates.name || existingUser.name,
+          handle: updates.handle || existingUser.handle,
+          avatarColor: updates.avatarColor || existingUser.avatarColor,
+          avatarUrl: updates.avatarUrl !== undefined ? updates.avatarUrl : existingUser.avatarUrl,
+          avatarMediaType: updates.avatarMediaType || existingUser.avatarMediaType,
+          coverUrl: updates.coverUrl !== undefined ? updates.coverUrl : existingUser.coverUrl,
+          coverMediaType: updates.coverMediaType || existingUser.coverMediaType,
+          customTitle: updates.customTitle !== undefined ? updates.customTitle : existingUser.customTitle,
+          statusMessage: updates.statusMessage !== undefined ? updates.statusMessage : existingUser.statusMessage,
+          customStatusEmoji: updates.customStatusEmoji !== undefined ? updates.customStatusEmoji : existingUser.customStatusEmoji,
+          bio: updates.bio !== undefined ? updates.bio : existingUser.bio,
+        };
+
+        userDb.set(cleanUsername, updated);
+        saveUserDatabase();
+        const { password: _, ...safeProfile } = updated;
+        return res.json({ success: true, user: safeProfile });
+      }
+
+      res.status(404).json({ error: 'User not found in database.' });
+    } catch (err: any) {
+      console.error('Profile update error:', err);
+      res.status(500).json({ error: 'Failed to update profile.' });
+    }
   });
 
   app.get('/api/rooms', (req, res) => {
@@ -276,6 +483,7 @@ Respond in STRICT JSON format matching this schema:
               },
               messages: room.messages.slice(-50),
               activeCall: room.activeCall,
+              announcement: currentAnnouncement,
             }));
 
             // Broadcast user joined to other participants
@@ -442,6 +650,138 @@ Respond in STRICT JSON format matching this schema:
                 userName: client.userName,
                 isTyping: msg.isTyping,
               }, ws);
+            }
+            break;
+          }
+
+          case 'admin_clear_chat': {
+            const targetRoomId = msg.roomId || client.roomId;
+            if (targetRoomId) {
+              const room = rooms.get(targetRoomId);
+              if (room) {
+                room.messages = [];
+                const sysClearMsg = {
+                  id: `sys-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+                  roomId: targetRoomId,
+                  senderId: 'system',
+                  senderName: 'System',
+                  senderAvatarColor: '#ef4444',
+                  text: `🧹 Room chat was cleared by Administrator ${msg.adminName || client.userName}`,
+                  timestamp: Date.now(),
+                  isSystem: true,
+                };
+                room.messages.push(sysClearMsg);
+                broadcastToRoom(targetRoomId, {
+                  type: 'admin_clear_chat',
+                  roomId: targetRoomId,
+                  adminName: msg.adminName || client.userName,
+                });
+                broadcastToRoom(targetRoomId, {
+                  type: 'chat_message',
+                  message: sysClearMsg,
+                });
+              }
+            }
+            break;
+          }
+
+          case 'admin_kick_user': {
+            const { targetUserId, targetUserName, reason } = msg;
+            if (targetUserId) {
+              // Send kick notification to target user
+              sendDirectToUser(targetUserId, {
+                type: 'admin_kick_user',
+                targetUserId,
+                targetUserName: targetUserName || 'User',
+                adminName: msg.adminName || client.userName,
+                reason: reason || 'Removed by Administrator',
+              });
+
+              // Broadcast notice to room
+              if (client.roomId) {
+                const room = rooms.get(client.roomId);
+                if (room) {
+                  room.participants.delete(targetUserId);
+                  const sysKickMsg = {
+                    id: `sys-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+                    roomId: client.roomId,
+                    senderId: 'system',
+                    senderName: 'System',
+                    senderAvatarColor: '#ef4444',
+                    text: `⚠️ ${targetUserName || 'User'} was kicked by Administrator ${msg.adminName || client.userName}${reason ? `: "${reason}"` : ''}`,
+                    timestamp: Date.now(),
+                    isSystem: true,
+                  };
+                  room.messages.push(sysKickMsg);
+                  broadcastToRoom(client.roomId, {
+                    type: 'user_left',
+                    userId: targetUserId,
+                  });
+                  broadcastToRoom(client.roomId, {
+                    type: 'chat_message',
+                    message: sysKickMsg,
+                  });
+                }
+              }
+            }
+            break;
+          }
+
+          case 'admin_broadcast': {
+            const announcement = msg.announcement;
+            if (announcement) {
+              currentAnnouncement = announcement;
+              broadcastToAll({
+                type: 'admin_broadcast',
+                announcement,
+                adminName: msg.adminName || client.userName,
+              });
+
+              // Also create system chat message in all rooms
+              for (const [roomId, room] of rooms.entries()) {
+                const sysAnnounceMsg = {
+                  id: `sys-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+                  roomId,
+                  senderId: 'system',
+                  senderName: '📢 Official Announcement',
+                  senderAvatarColor: '#8b5cf6',
+                  text: `📢 ${announcement}`,
+                  timestamp: Date.now(),
+                  isSystem: true,
+                  isAnnouncement: true,
+                };
+                room.messages.push(sysAnnounceMsg);
+                broadcastToRoom(roomId, {
+                  type: 'chat_message',
+                  message: sysAnnounceMsg,
+                });
+              }
+            }
+            break;
+          }
+
+          case 'admin_badge_update': {
+            const { targetUserId, isVerified, isVip, customTitle } = msg;
+            if (targetUserId) {
+              const targetProfile = globalUsers.get(targetUserId);
+              if (targetProfile) {
+                if (isVerified !== undefined) targetProfile.isVerified = isVerified;
+                if (isVip !== undefined) targetProfile.isVip = isVip;
+                if (customTitle !== undefined) targetProfile.customTitle = customTitle;
+                globalUsers.set(targetUserId, targetProfile);
+
+                // Update in rooms
+                for (const room of rooms.values()) {
+                  if (room.participants.has(targetUserId)) {
+                    room.participants.set(targetUserId, targetProfile);
+                  }
+                }
+
+                broadcastToAll({
+                  type: 'user_updated',
+                  user: targetProfile,
+                });
+              }
             }
             break;
           }

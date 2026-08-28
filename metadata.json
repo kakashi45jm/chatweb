@@ -1,6 +1,6 @@
 {
   "name": "LiveCall & Web Chat (iPad mini 2 & iOS 9.3.5 Compatible)",
-  "description": "Real-time chat, crystal-clear audio calls, and video calls with WebRTC and legacy fallback support for iPad mini 2 and iOS 9.3.5.",
+  "description": "Real-time 1v1 and group chat, audio/video calls with legacy iOS compatibility, Pink Void interface, Gemini AI translation and grammar assistance, media sharing, and admin moderation.",
   "requestFramePermissions": [
     "camera",
     "microphone"

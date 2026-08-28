@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { UserProfile, ChatMessage, RoomInfo, StreamMode, WSMessage, DirectMessageThread } from './types';
 import { useWebRTC } from './hooks/useWebRTC';
 import { runDeviceDiagnostics, unlockAudio, getSafeAudioContext, autoEnableOlderSafariCompatibility } from './utils/legacyCompatibility';
+import { safeSetStorage, safeGetStorage, safeRemoveStorage, sanitizeUserForStorage } from './utils/safeStorage';
 import { soundEffects } from './utils/audioHelper';
 import { Sidebar } from './components/Sidebar';
 import { ChatArea } from './components/ChatArea';
@@ -23,29 +24,27 @@ export default function App() {
 
   // Authentication State
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(() => {
-    if (typeof localStorage !== 'undefined') {
-      const remember = localStorage.getItem('livecall_remember_me');
-      const savedUser = localStorage.getItem('livecall_auth_user');
-      return remember === 'true' && !!savedUser;
-    }
-    return false;
+    const remember = safeGetStorage('livecall_remember_me');
+    const savedUser = safeGetStorage('livecall_auth_user');
+    return remember === 'true' && !!savedUser;
   });
 
   // User Profile
   const [currentUser, setCurrentUser] = useState<UserProfile>(() => {
     let savedUserObj: any = null;
-    if (typeof localStorage !== 'undefined') {
-      const raw = localStorage.getItem('livecall_auth_user');
-      if (raw) {
-        try {
-          savedUserObj = JSON.parse(raw);
-        } catch {}
-      }
+    const raw = safeGetStorage('livecall_auth_user');
+    if (raw) {
+      try {
+        savedUserObj = JSON.parse(raw);
+      } catch {}
     }
 
-    const savedName = savedUserObj?.name || (typeof localStorage !== 'undefined' ? localStorage.getItem('livecall_username') : null);
-    const savedColor = savedUserObj?.avatarColor || (typeof localStorage !== 'undefined' ? localStorage.getItem('livecall_avatar_color') : null);
-    const deviceName = diagnostics.isiPadMini2Suspected
+    const savedName = savedUserObj?.name || safeGetStorage('livecall_username');
+    const savedColor = savedUserObj?.avatarColor || safeGetStorage('livecall_avatar_color');
+    const savedIsAdmin = savedUserObj?.isAdmin ?? false;
+    const deviceName = savedIsAdmin
+      ? 'Admin'
+      : diagnostics.isiPadMini2Suspected
       ? 'iPad mini 2'
       : diagnostics.isiPad
       ? 'iPad'
@@ -67,12 +66,16 @@ export default function App() {
       avatarMediaType: savedUserObj?.avatarMediaType || 'image',
       coverUrl: savedUserObj?.coverUrl,
       coverMediaType: savedUserObj?.coverMediaType || 'image',
-      statusMessage: savedUserObj?.statusMessage || 'Available on LiveCall',
-      customStatusEmoji: savedUserObj?.customStatusEmoji || '🟢',
-      bio: savedUserObj?.bio || 'Real-time calling and messaging enthusiast.',
+      isAdmin: savedIsAdmin,
+      isVerified: savedUserObj?.isVerified ?? (savedIsAdmin ? true : false),
+      isVip: savedUserObj?.isVip ?? (savedIsAdmin ? true : false),
+      customTitle: savedUserObj?.customTitle || (savedIsAdmin ? 'Founder & Administrator' : undefined),
+      statusMessage: savedUserObj?.statusMessage || (savedIsAdmin ? '⚡ LiveCall Administrator' : 'Available on LiveCall'),
+      customStatusEmoji: savedUserObj?.customStatusEmoji || (savedIsAdmin ? '👑' : '🟢'),
+      bio: savedUserObj?.bio || (savedIsAdmin ? 'Official LiveCall System Administrator & Founder.' : 'Real-time calling and messaging enthusiast.'),
       preferredLanguage: savedUserObj?.preferredLanguage || 'English',
       autoTranslate: savedUserObj?.autoTranslate ?? true,
-      deviceType: deviceName,
+      deviceType: savedIsAdmin ? 'Admin' : deviceName,
       isIosLegacy: diagnostics.isiOS && (diagnostics.iosVersion ? parseFloat(diagnostics.iosVersion) < 13 : true),
       joinedAt: Date.now(),
     };
@@ -345,10 +348,8 @@ export default function App() {
     if (activeCall) {
       endCall();
     }
-    if (typeof localStorage !== 'undefined') {
-      localStorage.removeItem('livecall_auth_user');
-      localStorage.removeItem('livecall_remember_me');
-    }
+    safeRemoveStorage('livecall_auth_user');
+    safeRemoveStorage('livecall_remember_me');
     if (wsRef.current) {
       sendWS({ type: 'leave_room', roomId: currentRoomId });
       wsRef.current.close();
@@ -373,11 +374,22 @@ export default function App() {
   // Update Profile (Name, Bio, Handle, Avatar, Language)
   const handleSaveProfile = (updatedProfile: UserProfile) => {
     setCurrentUser(updatedProfile);
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('livecall_auth_user', JSON.stringify(updatedProfile));
-      localStorage.setItem('livecall_username', updatedProfile.name);
-      localStorage.setItem('livecall_avatar_color', updatedProfile.avatarColor);
-    }
+    const sanitized = sanitizeUserForStorage(updatedProfile);
+    safeSetStorage('livecall_auth_user', JSON.stringify(sanitized));
+    safeSetStorage('livecall_username', updatedProfile.name);
+    safeSetStorage('livecall_avatar_color', updatedProfile.avatarColor);
+    
+    // Sync to database
+    const username = updatedProfile.handle?.replace(/^@/, '') || updatedProfile.name;
+    fetch('/api/auth/update-profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username,
+        updates: updatedProfile,
+      }),
+    }).catch(() => {});
+
     sendWS({
       type: 'user_updated',
       user: updatedProfile,
@@ -525,6 +537,26 @@ export default function App() {
     ? dmTypingMap[activeDmPartner.id] ? [activeDmPartner.name] : []
     : typingUsers;
 
+  // Admin Actions
+  const handleAdminClearChat = () => {
+    if (!currentUser.isAdmin) return;
+    if (confirm('Are you sure you want to clear all messages in this room?')) {
+      sendWS({
+        type: 'admin_clear_chat',
+        roomId: currentRoomId,
+      });
+      setMessages([]);
+    }
+  };
+
+  const handleAdminBroadcast = (announcement: string) => {
+    if (!currentUser.isAdmin) return;
+    sendWS({
+      type: 'admin_broadcast',
+      announcement,
+    });
+  };
+
   return (
     <div id="livecall-app-root" className="flex h-screen w-screen overflow-hidden bg-slate-900 font-sans select-none antialiased">
       
@@ -539,8 +571,8 @@ export default function App() {
         </button>
         
         <div className="font-bold text-sm flex items-center gap-1.5">
-          <Radio className="w-4 h-4 text-blue-400" />
-          <span>LiveCall Web</span>
+          <Radio className="w-4 h-4 text-pink-400" />
+          <span>Pink Void Live</span>
         </div>
 
         <div className="flex items-center gap-2">
@@ -585,6 +617,7 @@ export default function App() {
           streamModePreference={streamModePreference}
           isConnected={isConnected}
           onLogout={handleLogout}
+          onAdminBroadcast={handleAdminBroadcast}
         />
       </div>
 
@@ -597,7 +630,7 @@ export default function App() {
       )}
 
       {/* Main Chat & Interactive Canvas Area */}
-      <main className="flex-1 flex flex-col h-full pt-12 sm:pt-0 overflow-hidden bg-slate-50">
+      <main className="flex-1 flex flex-col h-full pt-12 sm:pt-0 overflow-hidden bg-[#0d0f1a]">
         
         {/* Older Safari Auto-Enable Compatibility Bar */}
         {showAutoSafariBanner && (
@@ -652,6 +685,8 @@ export default function App() {
           dmPartner={activeDmPartner || undefined}
           onOpenUserProfile={handleOpenUserProfile}
           preferredLanguage={currentUser.preferredLanguage || 'English'}
+          isAdmin={currentUser.isAdmin}
+          onAdminClearChat={handleAdminClearChat}
         />
       </main>
 

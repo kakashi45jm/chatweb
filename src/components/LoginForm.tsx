@@ -1,24 +1,22 @@
 import React, { useState } from 'react';
 import { UserProfile, DeviceDiagnostics } from '../types';
 import { 
-  Radio, 
   User, 
   Lock, 
-  Mail, 
-  Hash, 
   Eye, 
   EyeOff, 
   LogIn, 
   UserPlus, 
-  Tablet, 
   Sparkles, 
-  CheckCircle2, 
-  Volume2, 
-  ShieldCheck,
+  ShieldCheck, 
+  AlertCircle,
+  Radio,
+  Layers,
   Zap
 } from 'lucide-react';
 import { unlockAudio, getSafeAudioContext } from '../utils/legacyCompatibility';
 import { soundEffects } from '../utils/audioHelper';
+import { safeSetStorage, sanitizeUserForStorage } from '../utils/safeStorage';
 
 interface Props {
   initialRoomId: string;
@@ -26,360 +24,448 @@ interface Props {
   onLogin: (user: UserProfile, roomId: string) => void;
 }
 
-const AVATAR_COLORS = [
-  '#3b82f6', // blue
-  '#10b981', // emerald
-  '#8b5cf6', // purple
-  '#f59e0b', // amber
-  '#ec4899', // pink
-  '#06b6d4', // cyan
-];
-
-const PRESET_ACCOUNTS = [
-  { name: 'iPad mini 2 User', email: 'ipad@livecall.local', color: '#10b981', role: 'Tablet Client' },
-  { name: 'Caller Alpha', email: 'alpha@livecall.local', color: '#3b82f6', role: 'Web Client' },
-  { name: 'Caller Beta', email: 'beta@livecall.local', color: '#8b5cf6', role: 'Mobile Client' },
-];
+export const ADMIN_CREDENTIALS = {
+  username: 'beneqt23',
+  displayName: 'joo',
+  password: 'kaizen12',
+};
 
 export function LoginForm({ initialRoomId, diagnostics, onLogin }: Props) {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [selectedColor, setSelectedColor] = useState(AVATAR_COLORS[0]);
-  const [roomId, setRoomId] = useState(initialRoomId || 'general');
-  const [rememberMe, setRememberMe] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
 
   const deviceBadge = diagnostics.isiPadMini2Suspected
-    ? 'iPad mini 2 (iOS 9.3.5)'
+    ? 'iPad mini 2'
     : diagnostics.isiPad
     ? 'Apple iPad'
     : diagnostics.isiOS
     ? `iOS ${diagnostics.iosVersion || 'Device'}`
-    : diagnostics.isOlderSafari
-    ? 'Older Safari'
     : 'Web Browser';
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
+    setSuccessMsg('');
 
-    const trimmedName = name.trim();
-    if (!trimmedName) {
-      setErrorMsg('Please enter a display name.');
+    const cleanUsername = username.trim().toLowerCase().replace(/^@/, '');
+    if (!cleanUsername) {
+      setErrorMsg('Please enter your username.');
       return;
     }
 
-    if (mode === 'signup' && email && !email.includes('@')) {
-      setErrorMsg('Please enter a valid email address.');
+    if (!password) {
+      setErrorMsg('Please enter your password.');
       return;
     }
 
-    // Unlock iOS Audio on click gesture
-    const ctx = getSafeAudioContext();
-    unlockAudio(ctx);
-    soundEffects.playCallConnect();
-
-    const cleanRoom = roomId.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '-') || 'general';
-
-    const newUser: UserProfile = {
-      id: `usr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-      name: trimmedName,
-      email: email.trim() || undefined,
-      avatarColor: selectedColor,
-      deviceType: deviceBadge,
-      isIosLegacy: diagnostics.isiOS && (diagnostics.iosVersion ? parseFloat(diagnostics.iosVersion) < 13 : true),
-      joinedAt: Date.now(),
-    };
-
-    if (rememberMe && typeof localStorage !== 'undefined') {
-      localStorage.setItem('livecall_auth_user', JSON.stringify(newUser));
-      localStorage.setItem('livecall_username', newUser.name);
-      localStorage.setItem('livecall_avatar_color', newUser.avatarColor);
-      localStorage.setItem('livecall_remember_me', 'true');
+    if (mode === 'signup' && password.length < 4) {
+      setErrorMsg('Password must be at least 4 characters long.');
+      return;
     }
 
-    onLogin(newUser, cleanRoom);
-  };
+    setIsLoading(true);
 
-  const handleQuickPreset = (preset: typeof PRESET_ACCOUNTS[0]) => {
-    setName(preset.name);
-    setEmail(preset.email);
-    setSelectedColor(preset.color);
-    setPassword('demo1234');
-    setErrorMsg('');
+    try {
+      // 1. Audio unlock for iOS compatibility
+      try {
+        unlockAudio();
+        getSafeAudioContext();
+        soundEffects.playMessageSound(true);
+      } catch {}
 
-    // Trigger instant login
-    const ctx = getSafeAudioContext();
-    unlockAudio(ctx);
-    soundEffects.playCallConnect();
+      if (mode === 'signup') {
+        // Register Account in Server Database
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: cleanUsername,
+            password: password,
+            name: displayName.trim() || cleanUsername,
+          }),
+        });
 
-    const cleanRoom = roomId.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '-') || 'general';
-    const newUser: UserProfile = {
-      id: `usr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-      name: preset.name,
-      email: preset.email,
-      avatarColor: preset.color,
-      deviceType: `${deviceBadge} (${preset.role})`,
-      isIosLegacy: diagnostics.isiOS && (diagnostics.iosVersion ? parseFloat(diagnostics.iosVersion) < 13 : true),
-      joinedAt: Date.now(),
-    };
+        const data = await res.json();
+        if (!res.ok) {
+          setErrorMsg(data.error || 'Failed to register account.');
+          setIsLoading(false);
+          return;
+        }
 
-    if (rememberMe && typeof localStorage !== 'undefined') {
-      localStorage.setItem('livecall_auth_user', JSON.stringify(newUser));
-      localStorage.setItem('livecall_username', newUser.name);
-      localStorage.setItem('livecall_avatar_color', newUser.avatarColor);
+        setSuccessMsg('Account registered & saved to database!');
+        
+        // Auto login with new user profile
+        const userProfile: UserProfile = {
+          ...data.user,
+          deviceType: data.user?.isAdmin ? 'Admin' : deviceBadge,
+          isIosLegacy: diagnostics.isiOS && (diagnostics.iosVersion ? parseFloat(diagnostics.iosVersion) < 13 : true),
+          joinedAt: data.user.createdAt || Date.now(),
+        };
+
+        const sanitized = sanitizeUserForStorage(userProfile);
+        safeSetStorage('livecall_remember_me', 'true');
+        safeSetStorage('livecall_auth_user', JSON.stringify(sanitized));
+        safeSetStorage('livecall_username', userProfile.name);
+        safeSetStorage('livecall_avatar_color', userProfile.avatarColor);
+
+        setTimeout(() => {
+          onLogin(userProfile, initialRoomId || 'general');
+        }, 300);
+
+      } else {
+        // Sign In Existing Account from Server Database
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: cleanUsername,
+            password: password,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          // Check if fallback admin login locally if server DB is offline
+          if (cleanUsername === ADMIN_CREDENTIALS.username && password === ADMIN_CREDENTIALS.password) {
+            const adminProfile: UserProfile = {
+              id: 'usr-admin-beneqt23',
+              name: ADMIN_CREDENTIALS.displayName,
+              handle: `@${ADMIN_CREDENTIALS.username}`,
+              avatarColor: '#ec4899',
+              isAdmin: true,
+              isVerified: true,
+              isVip: true,
+              customTitle: 'Founder & Administrator',
+              statusMessage: '⚡ LiveCall Administrator',
+              customStatusEmoji: '👑',
+              bio: 'Official LiveCall System Administrator & Founder.',
+              deviceType: 'Admin',
+              isIosLegacy: diagnostics.isiOS && (diagnostics.iosVersion ? parseFloat(diagnostics.iosVersion) < 13 : true),
+              joinedAt: Date.now(),
+            };
+            
+            const sanitizedAdmin = sanitizeUserForStorage(adminProfile);
+            safeSetStorage('livecall_remember_me', 'true');
+            safeSetStorage('livecall_auth_user', JSON.stringify(sanitizedAdmin));
+            onLogin(adminProfile, initialRoomId || 'general');
+            return;
+          }
+
+          setErrorMsg(data.error || 'Invalid username or password.');
+          setIsLoading(false);
+          return;
+        }
+
+        const userProfile: UserProfile = {
+          ...data.user,
+          deviceType: data.user?.isAdmin ? 'Admin' : deviceBadge,
+          isIosLegacy: diagnostics.isiOS && (diagnostics.iosVersion ? parseFloat(diagnostics.iosVersion) < 13 : true),
+          joinedAt: data.user.createdAt || Date.now(),
+        };
+
+        const sanitized = sanitizeUserForStorage(userProfile);
+        safeSetStorage('livecall_remember_me', 'true');
+        safeSetStorage('livecall_auth_user', JSON.stringify(sanitized));
+        safeSetStorage('livecall_username', userProfile.name);
+        safeSetStorage('livecall_avatar_color', userProfile.avatarColor);
+
+        onLogin(userProfile, initialRoomId || 'general');
+      }
+
+    } catch (err: any) {
+      console.error('Auth request error:', err);
+      // Client-side fallback if server endpoint offline
+      if (cleanUsername === ADMIN_CREDENTIALS.username && password === ADMIN_CREDENTIALS.password) {
+        const adminProfile: UserProfile = {
+          id: 'usr-admin-beneqt23',
+          name: ADMIN_CREDENTIALS.displayName,
+          handle: `@${ADMIN_CREDENTIALS.username}`,
+          avatarColor: '#ec4899',
+          isAdmin: true,
+          isVerified: true,
+          isVip: true,
+          customTitle: 'Founder & Administrator',
+          statusMessage: '⚡ LiveCall Administrator',
+          customStatusEmoji: '👑',
+          bio: 'Official LiveCall System Administrator & Founder.',
+          deviceType: 'Admin',
+          isIosLegacy: diagnostics.isiOS && (diagnostics.iosVersion ? parseFloat(diagnostics.iosVersion) < 13 : true),
+          joinedAt: Date.now(),
+        };
+        const sanitizedAdmin = sanitizeUserForStorage(adminProfile);
+        safeSetStorage('livecall_remember_me', 'true');
+        safeSetStorage('livecall_auth_user', JSON.stringify(sanitizedAdmin));
+        onLogin(adminProfile, initialRoomId || 'general');
+        return;
+      }
+
+      setErrorMsg('Connection error. Please try again.');
+    } finally {
+      setIsLoading(false);
     }
-
-    onLogin(newUser, cleanRoom);
   };
 
   return (
-    <div id="login-screen" className="min-h-screen w-full flex items-center justify-center p-4 sm:p-6 bg-slate-950 text-slate-100 overflow-y-auto">
-      <div className="w-full max-w-md my-auto space-y-4">
-        
-        {/* Brand Logo & Title */}
-        <div className="text-center space-y-2">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-teal-400 text-white shadow-xl shadow-blue-500/20">
-            <Radio className="w-7 h-7" />
-          </div>
-          <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
-            LiveCall Web
-          </h1>
-          <p className="text-xs text-slate-400 max-w-xs mx-auto">
-            High-compatibility WebRTC & audio/video calling for iOS 9.3.5, iPad mini 2, and modern devices.
-          </p>
-        </div>
+    <div className="min-h-screen bg-[#07070d] text-slate-100 flex flex-col justify-center items-center p-4 sm:p-6 relative overflow-hidden selection:bg-pink-500 selection:text-white">
+      
+      {/* Pink Void Cyber Atmosphere Background */}
+      <div className="absolute inset-0 pointer-events-none">
+        <div className="absolute -top-40 -left-40 w-96 h-96 bg-pink-600/15 rounded-full blur-3xl" />
+        <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-purple-600/20 rounded-full blur-3xl" />
+        <div className="absolute inset-0 bg-[radial-gradient(#ec4899_1px,transparent_1px)] [background-size:24px_24px] opacity-10" />
+      </div>
 
-        {/* Main Form Card */}
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-7 shadow-2xl space-y-5">
+      <div className="w-full max-w-md relative z-10 space-y-6">
+
+        {/* Pink Void Card with Aesthetic Header Banner */}
+        <div className="bg-[#11131f]/95 backdrop-blur-xl rounded-3xl border border-pink-500/20 shadow-2xl shadow-pink-950/40 overflow-hidden">
           
-          {/* Mode Switcher Tabs */}
-          <div className="flex p-1 bg-slate-950/80 rounded-xl border border-slate-800">
-            <button
-              type="button"
-              id="tab-signin"
-              onClick={() => { setMode('signin'); setErrorMsg(''); }}
-              className={`flex-1 py-2 text-xs font-bold rounded-lg transition ${
-                mode === 'signin'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Sign In
-            </button>
-            <button
-              type="button"
-              id="tab-signup"
-              onClick={() => { setMode('signup'); setErrorMsg(''); }}
-              className={`flex-1 py-2 text-xs font-bold rounded-lg transition ${
-                mode === 'signup'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Quick Join / Register
-            </button>
-          </div>
-
-          {/* Device & Auto-Enable Status Chip */}
-          <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-950 border border-slate-800/80 text-xs">
-            <div className="flex items-center gap-2 min-w-0">
-              <Tablet className="w-4 h-4 text-blue-400 shrink-0" />
-              <span className="text-slate-300 truncate font-medium">{deviceBadge}</span>
-            </div>
-            <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold shrink-0">
-              Call Engine Ready
-            </span>
-          </div>
-
-          {/* Form */}
-          <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Looping Pink Void Video Banner */}
+          <div className="relative w-full h-44 sm:h-48 bg-slate-950 p-6 flex flex-col justify-end overflow-hidden border-b border-pink-500/20">
+            {/* Background Video Loop */}
+            <video
+              src="https://assets.mixkit.co/videos/preview/mixkit-tunnel-of-futuristic-neon-lights-41485-large.mp4"
+              autoPlay
+              loop
+              muted
+              playsInline
+              className="absolute inset-0 w-full h-full object-cover opacity-80 pointer-events-none scale-105"
+            />
             
-            {/* Display Name */}
-            <div className="space-y-1.5">
-              <label className="block text-xs font-bold text-slate-300">
-                Display Name <span className="text-red-400">*</span>
-              </label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
-                  <User className="w-4 h-4" />
-                </div>
-                <input
-                  id="login-name-input"
-                  type="text"
-                  required
-                  placeholder="e.g. Alex (iPad), Sam"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2.5 bg-slate-950 border border-slate-800 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 rounded-xl text-xs sm:text-sm text-white placeholder-slate-500 outline-hidden transition"
-                />
+            {/* Dark Neon Vignette & Gradient Overlay for optimal legibility */}
+            <div className="absolute inset-0 bg-gradient-to-t from-[#11131f] via-black/40 to-transparent pointer-events-none" />
+            <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_0%,rgba(0,0,0,0.6)_100%)] pointer-events-none" />
+
+            {/* Geometric Cyber Grid Overlay */}
+            <div className="absolute inset-0 bg-[linear-gradient(to_right,#ffffff08_1px,transparent_1px),linear-gradient(to_bottom,#ffffff08_1px,transparent_1px)] bg-[size:16px_16px] opacity-30 pointer-events-none" />
+
+            <div className="relative z-10 space-y-1">
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-pink-500/30 backdrop-blur-md border border-pink-400/40 text-[10px] font-mono text-pink-200 font-bold uppercase tracking-wider shadow-sm">
+                <span className="w-1.5 h-1.5 rounded-full bg-pink-400 animate-pulse shadow-sm shadow-pink-400" />
+                LiveCall & Web Chat
               </div>
+
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-pink-300 via-rose-200 to-purple-200 tracking-tight drop-shadow-[0_2px_10px_rgba(236,72,153,0.5)]">
+                PINK VOID
+              </h1>
+              
+              <p className="text-xs text-pink-100/80 font-medium drop-shadow-sm">
+                Ultra-fast Voice, Video & Text Communication
+              </p>
+            </div>
+          </div>
+
+          {/* Auth Card Content */}
+          <div className="p-6 sm:p-7 space-y-5">
+            
+            {/* Mode Switcher Tabs (Sign In / Register Account) */}
+            <div className="grid grid-cols-2 p-1 bg-black/40 rounded-2xl border border-white/5">
+              <button
+                id="tab-signin-btn"
+                type="button"
+                onClick={() => {
+                  setMode('signin');
+                  setErrorMsg('');
+                  setSuccessMsg('');
+                }}
+                className={`py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center gap-1.5 ${
+                  mode === 'signin'
+                    ? 'bg-pink-600 text-white shadow-lg shadow-pink-600/30'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <LogIn className="w-4 h-4" />
+                <span>Sign In</span>
+              </button>
+
+              <button
+                id="tab-register-btn"
+                type="button"
+                onClick={() => {
+                  setMode('signup');
+                  setErrorMsg('');
+                  setSuccessMsg('');
+                }}
+                className={`py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center gap-1.5 ${
+                  mode === 'signup'
+                    ? 'bg-pink-600 text-white shadow-lg shadow-pink-600/30'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <UserPlus className="w-4 h-4" />
+                <span>Register</span>
+              </button>
             </div>
 
-            {/* Email (Optional or for signup) */}
-            <div className="space-y-1.5">
-              <label className="block text-xs font-bold text-slate-300">
-                Email / Account Identifier <span className="text-slate-500 font-normal">(Optional)</span>
-              </label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
-                  <Mail className="w-4 h-4" />
-                </div>
-                <input
-                  id="login-email-input"
-                  type="email"
-                  placeholder="user@example.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2.5 bg-slate-950 border border-slate-800 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 rounded-xl text-xs sm:text-sm text-white placeholder-slate-500 outline-hidden transition"
-                />
-              </div>
-            </div>
-
-            {/* Password / Passcode */}
-            <div className="space-y-1.5">
-              <label className="block text-xs font-bold text-slate-300">
-                Passcode / Password <span className="text-slate-500 font-normal">(Optional)</span>
-              </label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
-                  <Lock className="w-4 h-4" />
-                </div>
-                <input
-                  id="login-password-input"
-                  type={showPassword ? 'text' : 'password'}
-                  placeholder="Enter passcode"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-9 pr-10 py-2.5 bg-slate-950 border border-slate-800 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 rounded-xl text-xs sm:text-sm text-white placeholder-slate-500 outline-hidden transition"
-                />
-                <button
-                  type="button"
-                  id="toggle-password-vis-btn"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 hover:text-slate-300"
-                >
-                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-            </div>
-
-            {/* Room / Channel */}
-            <div className="space-y-1.5">
-              <label className="block text-xs font-bold text-slate-300">
-                Join Room Channel
-              </label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
-                  <Hash className="w-4 h-4" />
-                </div>
-                <input
-                  id="login-room-input"
-                  type="text"
-                  placeholder="general"
-                  value={roomId}
-                  onChange={(e) => setRoomId(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2.5 bg-slate-950 border border-slate-800 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 rounded-xl text-xs sm:text-sm text-white placeholder-slate-500 outline-hidden transition font-mono"
-                />
-              </div>
-            </div>
-
-            {/* Avatar Theme Selector */}
-            <div className="space-y-1.5 pt-1">
-              <label className="block text-xs font-bold text-slate-300">
-                Profile Avatar Color
-              </label>
-              <div className="flex items-center justify-between p-2 rounded-xl bg-slate-950 border border-slate-800">
-                <div className="flex items-center gap-2">
-                  {AVATAR_COLORS.map((col) => (
-                    <button
-                      key={col}
-                      type="button"
-                      onClick={() => setSelectedColor(col)}
-                      className={`w-6 h-6 rounded-full transition-transform active:scale-95 ${
-                        selectedColor === col
-                          ? 'scale-115 ring-2 ring-white ring-offset-2 ring-offset-slate-900'
-                          : 'hover:scale-105 opacity-80'
-                      }`}
-                      style={{ backgroundColor: col }}
-                    />
-                  ))}
-                </div>
-                <div
-                  className="w-7 h-7 rounded-full flex items-center justify-center font-bold text-xs text-white shadow-sm"
-                  style={{ backgroundColor: selectedColor }}
-                >
-                  {(name || 'U').charAt(0).toUpperCase()}
-                </div>
-              </div>
-            </div>
-
-            {/* Remember Me Checkbox */}
-            <div className="flex items-center justify-between pt-1">
-              <label className="flex items-center space-x-2 text-xs text-slate-400 cursor-pointer">
-                <input
-                  id="remember-me-checkbox"
-                  type="checkbox"
-                  checked={rememberMe}
-                  onChange={(e) => setRememberMe(e.target.checked)}
-                  className="rounded border-slate-700 bg-slate-950 text-blue-600 focus:ring-blue-500 h-4 w-4"
-                />
-                <span>Remember me on this iPad / browser</span>
-              </label>
-            </div>
-
-            {/* Error message */}
+            {/* Error Message */}
             {errorMsg && (
-              <div className="p-2.5 rounded-xl bg-red-900/40 border border-red-500/40 text-red-200 text-xs font-medium">
-                {errorMsg}
+              <div className="p-3 rounded-xl bg-red-950/50 border border-red-500/30 text-red-300 text-xs flex items-center gap-2 animate-in fade-in">
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                <span>{errorMsg}</span>
               </div>
             )}
 
-            {/* Submit Button */}
-            <button
-              id="login-submit-btn"
-              type="submit"
-              className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 active:scale-98 text-white font-bold text-xs sm:text-sm shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition"
-            >
-              {mode === 'signin' ? <LogIn className="w-4 h-4" /> : <UserPlus className="w-4 h-4" />}
-              <span>{mode === 'signin' ? 'Enter Chat & Calling' : 'Join Room & Start Calling'}</span>
-            </button>
+            {/* Success Message */}
+            {successMsg && (
+              <div className="p-3 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2 animate-in fade-in">
+                <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-400" />
+                <span>{successMsg}</span>
+              </div>
+            )}
 
-          </form>
-
-          {/* Quick 1-Click Demo Accounts */}
-          <div className="pt-2 border-t border-slate-800 space-y-2">
-            <div className="flex items-center justify-between text-[11px] text-slate-400 font-bold uppercase tracking-wider">
-              <span className="flex items-center gap-1">
-                <Zap className="w-3 h-3 text-amber-400" /> Quick 1-Click Join:
-              </span>
-            </div>
-            
-            <div className="grid grid-cols-3 gap-1.5">
-              {PRESET_ACCOUNTS.map((preset) => (
-                <button
-                  key={preset.name}
-                  id={`quick-preset-${preset.name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`}
-                  type="button"
-                  onClick={() => handleQuickPreset(preset)}
-                  className="p-2 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800/80 text-left transition active:scale-95 flex flex-col justify-between"
-                >
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: preset.color }} />
-                    <span className="text-[11px] font-bold text-white truncate">{preset.name.split(' ')[0]}</span>
+            {/* Form */}
+            <form onSubmit={handleSubmit} className="space-y-4">
+              
+              {/* Username */}
+              <div className="space-y-1.5">
+                <label className="block text-xs font-bold text-slate-300">
+                  Username <span className="text-pink-400">*</span>
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                    <User className="w-4 h-4" />
                   </div>
-                  <span className="text-[9px] text-slate-400">{preset.role}</span>
+                  <input
+                    id="auth-username-input"
+                    type="text"
+                    required
+                    placeholder="Enter your username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2.5 bg-black/40 border border-white/10 focus:border-pink-500 focus:ring-2 focus:ring-pink-500/20 rounded-xl text-xs sm:text-sm text-white placeholder-slate-500 outline-hidden transition"
+                  />
+                </div>
+              </div>
+
+              {/* Display Name (Only in Register Mode) */}
+              {mode === 'signup' && (
+                <div className="space-y-1.5 animate-in fade-in">
+                  <label className="block text-xs font-bold text-slate-300">
+                    Display Name <span className="text-slate-500 font-normal">(Optional)</span>
+                  </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                      <Sparkles className="w-4 h-4" />
+                    </div>
+                    <input
+                      id="auth-display-name-input"
+                      type="text"
+                      placeholder="Your preferred name (e.g. Alex)"
+                      value={displayName}
+                      onChange={(e) => setDisplayName(e.target.value)}
+                      className="w-full pl-10 pr-4 py-2.5 bg-black/40 border border-white/10 focus:border-pink-500 focus:ring-2 focus:ring-pink-500/20 rounded-xl text-xs sm:text-sm text-white placeholder-slate-500 outline-hidden transition"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Password */}
+              <div className="space-y-1.5">
+                <label className="block text-xs font-bold text-slate-300">
+                  Password <span className="text-pink-400">*</span>
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                    <Lock className="w-4 h-4" />
+                  </div>
+                  <input
+                    id="auth-password-input"
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    placeholder="Enter your password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full pl-10 pr-10 py-2.5 bg-black/40 border border-white/10 focus:border-pink-500 focus:ring-2 focus:ring-pink-500/20 rounded-xl text-xs sm:text-sm text-white placeholder-slate-500 outline-hidden transition"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 hover:text-slate-300"
+                    tabIndex={-1}
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4 text-slate-400" />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Submit Action Button */}
+              <div className="pt-2">
+                <button
+                  id="auth-submit-btn"
+                  type="submit"
+                  disabled={isLoading}
+                  className="w-full py-3.5 rounded-xl bg-gradient-to-r from-pink-600 via-purple-600 to-indigo-600 hover:from-pink-500 hover:to-indigo-500 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-pink-600/30 transition active:scale-98 disabled:opacity-50 cursor-pointer"
+                >
+                  {isLoading ? (
+                    <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  ) : mode === 'signin' ? (
+                    <>
+                      <LogIn className="w-4 h-4" />
+                      <span>Sign In to Pink Void</span>
+                    </>
+                  ) : (
+                    <>
+                      <UserPlus className="w-4 h-4" />
+                      <span>Create Account & Save</span>
+                    </>
+                  )}
                 </button>
-              ))}
+              </div>
+
+            </form>
+
+            {/* Bottom Toggle Text */}
+            <div className="text-center pt-2 text-xs text-slate-400">
+              {mode === 'signin' ? (
+                <p>
+                  Don't have an account?{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode('signup');
+                      setErrorMsg('');
+                    }}
+                    className="text-pink-400 hover:text-pink-300 font-bold underline transition ml-1"
+                  >
+                    Register here
+                  </button>
+                </p>
+              ) : (
+                <p>
+                  Already have an account?{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode('signin');
+                      setErrorMsg('');
+                    }}
+                    className="text-pink-400 hover:text-pink-300 font-bold underline transition ml-1"
+                  >
+                    Sign in here
+                  </button>
+                </p>
+              )}
             </div>
+
           </div>
 
         </div>
 
+        {/* Minimal Footer */}
+        <div className="text-center text-[11px] text-slate-500 flex items-center justify-center gap-2">
+          <span>Pink Void v2.5</span>
+          <span>•</span>
+          <span>Compatible with iPad mini 2 & Modern Browsers</span>
+        </div>
+
       </div>
+
     </div>
   );
 }

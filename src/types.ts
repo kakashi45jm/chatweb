@@ -19,13 +19,17 @@ export interface UserProfile {
   bio?: string;
   preferredLanguage?: string;
   autoTranslate?: boolean;
+  isAdmin?: boolean;
+  isVip?: boolean;
+  isVerified?: boolean;
+  customTitle?: string;
   deviceType: string;
   isIosLegacy: boolean;
   joinedAt: number;
 }
 
 export interface ChatAttachment {
-  type: 'image' | 'audio' | 'file';
+  type: 'image' | 'video' | 'audio' | 'file';
   url: string; // base64 or blob URL
   name?: string;
   duration?: number; // for audio
@@ -48,10 +52,15 @@ export interface ChatMessage {
   senderAvatarColor: string;
   senderAvatarUrl?: string;
   senderAvatarMediaType?: 'image' | 'video';
+  senderIsAdmin?: boolean;
+  senderIsVip?: boolean;
+  senderIsVerified?: boolean;
+  senderTitle?: string;
   text: string;
   attachment?: ChatAttachment;
   timestamp: number;
   isSystem?: boolean;
+  isAnnouncement?: boolean;
   isPrivate?: boolean;
   recipientId?: string;
   recipientName?: string;
@@ -106,7 +115,7 @@ export interface DeviceDiagnostics {
 export type WSMessage =
   | { type: 'join_room'; roomId: string; user: UserProfile }
   | { type: 'leave_room'; roomId: string }
-  | { type: 'room_state'; room: RoomInfo; messages: ChatMessage[]; activeCall: ActiveCallState | null }
+  | { type: 'room_state'; room: RoomInfo; messages: ChatMessage[]; activeCall: ActiveCallState | null; announcement?: string }
   | { type: 'user_joined'; user: UserProfile }
   | { type: 'user_left'; userId: string }
   | { type: 'user_updated'; user: UserProfile }
@@ -114,6 +123,10 @@ export type WSMessage =
   | { type: 'private_chat_message'; message: ChatMessage }
   | { type: 'private_history'; partnerId: string; messages: ChatMessage[] }
   | { type: 'typing'; userId: string; userName: string; isTyping: boolean; isPrivate?: boolean; targetUserId?: string }
+  | { type: 'admin_clear_chat'; roomId: string; adminName: string }
+  | { type: 'admin_kick_user'; targetUserId: string; targetUserName: string; adminName: string; reason?: string }
+  | { type: 'admin_broadcast'; announcement: string; adminName: string }
+  | { type: 'admin_badge_update'; targetUserId: string; isVerified?: boolean; isVip?: boolean; customTitle?: string; adminName: string }
   | { type: 'call_initiate'; call: ActiveCallState }
   | { type: 'call_accept'; callId: string; userId: string; streamMode: 'webrtc' | 'legacy_relay' }
   | { type: 'call_reject'; callId: string; userId: string }
